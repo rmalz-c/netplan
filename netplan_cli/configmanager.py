@@ -30,14 +30,13 @@ from typing import Optional
 class ConfigManager(object):
     def __init__(self, prefix="/", extra_files={}):
         self.prefix = prefix
-        self.tempdir = tempfile.mkdtemp(prefix='netplan_')
-        self.temp_etc = os.path.join(self.tempdir, "etc")
-        self.temp_run = os.path.join(self.tempdir, "run")
         self.extra_files = extra_files
         self.new_interfaces = set()
         self.np_state: Optional[netplan.State] = None
 
     def __getattr__(self, attr):
+        if attr == '_tempdir':
+            return getattr(super(), attr)
         assert self.np_state is not None, "Must call parse() before accessing the config."
         return getattr(self.np_state, attr)
 
@@ -89,6 +88,7 @@ class ConfigManager(object):
         # Convoluted way to dump the parsed config to the logs...
         with tempfile.TemporaryFile() as tmp:
             self.np_state._dump_yaml(output_file=tmp)
+            tmp.seek(0)
             logging.debug("Merged config:\n{}".format(tmp.read()))
 
         return self.np_state
@@ -101,32 +101,43 @@ class ConfigManager(object):
         # Invalidate the current parsed state
         self.np_state = None
 
+    @property
+    def tempdir(self):
+        # Moved out of __init__ to avoid creating tempdir if not needed
+        # This broke configmanager on early boot when /tmp was not available
+        if not hasattr(self, '_tempdir'):
+            self._tempdir = tempfile.mkdtemp(prefix='netplan_')
+        return self._tempdir
+
     def backup(self, backup_config_dir=True):
+        temp_etc = os.path.join(self.tempdir, "etc")
+        temp_run = os.path.join(self.tempdir, "run")
         if backup_config_dir:
-            self._copy_tree(os.path.join(self.prefix, "etc/netplan"),
-                            os.path.join(self.temp_etc, "netplan"))
-        self._copy_tree(os.path.join(self.prefix, "run/NetworkManager/system-connections"),
-                        os.path.join(self.temp_run, "NetworkManager", "system-connections"),
-                        missing_ok=True)
-        self._copy_tree(os.path.join(self.prefix, "run/systemd/network"),
-                        os.path.join(self.temp_run, "systemd", "network"),
-                        missing_ok=True)
+            self.copy_tree(os.path.join(self.prefix, "etc/netplan"),
+                           os.path.join(temp_etc, "netplan"))
+        self.copy_tree(os.path.join(self.prefix, "run/NetworkManager/system-connections"),
+                       os.path.join(temp_run, "NetworkManager", "system-connections"),
+                       missing_ok=True)
+        self.copy_tree(os.path.join(self.prefix, "run/systemd/network"),
+                       os.path.join(temp_run, "systemd", "network"),
+                       missing_ok=True)
 
     def revert(self):
         try:
             for extra_file in dict(self.extra_files):
                 os.unlink(self.extra_files[extra_file])
                 del self.extra_files[extra_file]
-            temp_nm_path = "{}/NetworkManager/system-connections".format(self.temp_run)
-            temp_networkd_path = "{}/systemd/network".format(self.temp_run)
+            temp_run = os.path.join(self.tempdir, "run")
+            temp_nm_path = "{}/NetworkManager/system-connections".format(temp_run)
+            temp_networkd_path = "{}/systemd/network".format(temp_run)
             if os.path.exists(temp_nm_path):
                 shutil.rmtree(os.path.join(self.prefix, "run/NetworkManager/system-connections"))
-                self._copy_tree(temp_nm_path,
-                                os.path.join(self.prefix, "run/NetworkManager/system-connections"))
+                self.copy_tree(temp_nm_path,
+                               os.path.join(self.prefix, "run/NetworkManager/system-connections"))
             if os.path.exists(temp_networkd_path):
                 shutil.rmtree(os.path.join(self.prefix, "run/systemd/network"))
-                self._copy_tree(temp_networkd_path,
-                                os.path.join(self.prefix, "run/systemd/network"))
+                self.copy_tree(temp_networkd_path,
+                               os.path.join(self.prefix, "run/systemd/network"))
         except Exception as e:  # pragma: nocover (only relevant to filesystem failures)
             # If we reach here, we're in big trouble. We may have wiped out
             # file NM or networkd are using, and we most likely removed the
@@ -139,6 +150,8 @@ class ConfigManager(object):
             sys.exit(-1)
 
     def cleanup(self):
+        if not hasattr(self, '_tempdir'):
+            return
         shutil.rmtree(self.tempdir)
 
     def __del__(self):
@@ -151,14 +164,20 @@ class ConfigManager(object):
     def _copy_file(self, src, dst):
         shutil.copy(src, dst)
 
-    def _copy_tree(self, src, dst, missing_ok=False):
+    def copy_tree(self, src, dst, missing_ok=False, **kwargs):
         try:
-            shutil.copytree(src, dst)
+            shutil.copytree(src, dst, copy_function=copy_with_ownership, **kwargs)
         except FileNotFoundError:
             if missing_ok:
                 pass
             else:
                 raise
+
+
+def copy_with_ownership(src, dst, follow_symlinks=True):
+    shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+    stat = os.stat(src, follow_symlinks=follow_symlinks)
+    os.chown(dst, stat.st_uid, stat.st_gid, follow_symlinks=follow_symlinks)
 
 
 class ConfigurationError(Exception):

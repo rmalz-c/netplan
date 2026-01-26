@@ -65,6 +65,7 @@ typedef enum {
      * requires links to another netdef (such as vlan_link)
      * but it's not strictly mandatory
      * It's intended to be used only when renderer is NetworkManager
+     * Keep the PLACEHOLDER_ and MAX_ elements at the end of the enum
      */
     NETPLAN_DEF_TYPE_NM_PLACEHOLDER_,
     NETPLAN_DEF_TYPE_MAX_
@@ -105,7 +106,7 @@ typedef struct _NetplanStateIterator NetplanStateIterator;
  * @note    The idea is based on the GLib implementation of iterators.
  */
 struct _NetplanStateIterator {
-    void* placeholder;
+    void* placeholder; ///< Just a placeholder in memory
 };
 
 /*

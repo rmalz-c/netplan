@@ -400,10 +400,29 @@ netplan_state_new()
     return np_state;
 }
 
+gboolean
+_netplan_state_set_flags(NetplanState* np_state, const unsigned int flags, GError** error)
+{
+    if (flags >= NETPLAN_STATE_FLAGS_MAX_) {
+        g_set_error(error, NETPLAN_PARSER_ERROR, NETPLAN_ERROR_INVALID_FLAG,
+                    "Invalid flag set");
+        return FALSE;
+    }
+
+    np_state->flags = flags;
+    return TRUE;
+}
+
+unsigned int
+_netplan_state_get_flags(const NetplanState* np_state)
+{
+    return np_state->flags;
+}
+
 void
 netplan_state_clear(NetplanState** np_state_p)
 {
-    g_assert(np_state_p);
+    g_assert(np_state_p != NULL);
     NetplanState* np_state = *np_state_p;
     *np_state_p = NULL;
     netplan_state_reset(np_state);
@@ -443,19 +462,21 @@ netplan_state_reset(NetplanState* np_state)
         g_hash_table_destroy(np_state->global_renderer);
         np_state->global_renderer = NULL;
     }
+
+    np_state->flags = 0;
 }
 
 NetplanBackend
 netplan_state_get_backend(const NetplanState* np_state)
 {
-    g_assert(np_state);
+    g_assert(np_state != NULL);
     return np_state->backend;
 }
 
 guint
 netplan_state_get_netdefs_size(const NetplanState* np_state)
 {
-    g_assert(np_state);
+    g_assert(np_state != NULL);
     return np_state->netdefs ? g_hash_table_size(np_state->netdefs) : 0;
 }
 
@@ -486,7 +507,7 @@ CLEAR_FROM_FREE(free_address_options, address_options_clear, NetplanAddressOptio
 NetplanNetDefinition*
 netplan_state_get_netdef(const NetplanState* np_state, const char* id)
 {
-    g_assert(np_state);
+    g_assert(np_state != NULL);
     if (!np_state->netdefs)
         return NULL;
     return g_hash_table_lookup(np_state->netdefs, id);
@@ -495,70 +516,70 @@ netplan_state_get_netdef(const NetplanState* np_state, const char* id)
 ssize_t
 netplan_netdef_get_filepath(const NetplanNetDefinition* netdef, char* out_buffer, size_t out_buf_size)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netplan_copy_string(netdef->filepath, out_buffer, out_buf_size);
 }
 
 NetplanBackend
 netplan_netdef_get_backend(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->backend;
 }
 
 NetplanDefType
 netplan_netdef_get_type(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->type;
 }
 
 ssize_t
 netplan_netdef_get_id(const NetplanNetDefinition* netdef, char* out_buffer, size_t out_buf_size)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netplan_copy_string(netdef->id, out_buffer, out_buf_size);
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_vlan_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->vlan_link;
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_sriov_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->sriov_link;
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_bridge_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->bridge_link;
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_vrf_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->vrf_link;
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_bond_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->bond_link;
 }
 
 NetplanNetDefinition*
 netplan_netdef_get_peer_link(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->peer_link;
 }
 
@@ -572,56 +593,56 @@ netplan_state_has_nondefault_globals(const NetplanState* np_state)
 ssize_t
 _netplan_netdef_get_embedded_switch_mode(const NetplanNetDefinition* netdef, char* out_buffer, size_t out_buf_size)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netplan_copy_string(netdef->embedded_switch_mode, out_buffer, out_buf_size);
 }
 
 gboolean
 _netplan_netdef_get_delay_virtual_functions_rebind(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->sriov_delay_virtual_functions_rebind;
 }
 
 gboolean
 netplan_netdef_has_match(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->has_match;
 }
 
 gboolean
 _netplan_netdef_get_sriov_vlan_filter(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->sriov_vlan_filter;
 }
 
 guint
 _netplan_netdef_get_vlan_id(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->vlan_id;
 }
 
 gboolean
 _netplan_netdef_get_critical(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->critical;
 }
 
 gboolean
 _netplan_netdef_get_optional(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     return netdef->optional;
 }
 
 gboolean
 _netplan_netdef_is_trivial_compound_itf(const NetplanNetDefinition* netdef)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
     if (netdef->type == NETPLAN_DEF_TYPE_BOND)
         return !complex_object_is_dirty(netdef, &netdef->bond_params, sizeof(netdef->bond_params));
     else if (netdef->type == NETPLAN_DEF_TYPE_BRIDGE)
@@ -632,7 +653,7 @@ _netplan_netdef_is_trivial_compound_itf(const NetplanNetDefinition* netdef)
 ssize_t
 _netplan_netdef_get_bond_mode(const NetplanNetDefinition* netdef, char* out_buffer, size_t out_buf_size)
 {
-    g_assert(netdef);
+    g_assert(netdef != NULL);
 
     if (netdef->type == NETPLAN_DEF_TYPE_BOND && netdef->bond_params.mode)
         return netplan_copy_string(netdef->bond_params.mode, out_buffer, out_buf_size);

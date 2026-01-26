@@ -403,7 +403,7 @@ Match devices by MAC when setting options like: `wakeonlan` or `*-offload`.
   > respond to Router Advertisements.  If unset use the host kernel default
   > setting.
 
-- **`ra-overrides`** (mapping)
+- **`ra-overrides`** (mapping) – since 1.1
 
   > (networkd back end only) Overrides default IPv6 Router Advertisement (RA)
   > behaviour; see the `IPv6 Router Advertisement Overrides` section below.
@@ -462,7 +462,7 @@ Match devices by MAC when setting options like: `wakeonlan` or `*-offload`.
 
 - **`gateway4`**, **`gateway6`** (scalar)
 
-  > Deprecated, see `Default routes`.
+  > Deprecated, see [Default routes](#default-routes).
   > Set default gateway for IPv4/6, for manual address configuration. This
   > requires setting `addresses` too. Gateway IP addresses must be in a form
   > recognised by **`inet_pton`**(3). There should only be a single gateway
@@ -499,7 +499,7 @@ Match devices by MAC when setting options like: `wakeonlan` or `*-offload`.
   > "XX:XX:XX:XX:XX:XX". The following special options are also accepted:
   > `permanent` and `random`.
   > In addition to these options, the NetworkManager renderer also accepts
-  > `stable` and `preserve`.
+  > `stable`, `stable-ssid` (Wi-Fi only) and `preserve`.
   >
   > **Note:** This will not work reliably for devices matched by name
   > only and rendered by networkd, due to interactions with device
@@ -706,7 +706,7 @@ client processes as specified in the Netplan YAML.
 Overrides for IPv6 Router Advertisement (RA) behaviour (only supported with
 networkd back end).
 
-- **`ra-overrides`** (mapping)
+- **`ra-overrides`** (mapping) – since 1.1
 
   > The `ra-overrides` mappings override the default IPv6 Router
   > Advertisement behaviour.
@@ -842,10 +842,10 @@ network:
     > The receive window to be advertised for the route, represented by
     > number of segments. Must be a positive integer value.
 
-  - **`advertised-mss`** (scalar)
+  - **`advertised-mss`** (scalar) – since 1.1
 
-    > The Maximum MSS ('Maximal Segment Size') to advertise to these destinations when establishing TCP connections. 
-    > If it is not given, Linux uses a default value calculated from the first hop device MTU. 
+    > The Maximum MSS ('Maximal Segment Size') to advertise to these destinations when establishing TCP connections.
+    > If it is not given, Linux uses a default value calculated from the first hop device MTU.
     > Must be a positive integer.
 
 - **`routing-policy`** (mapping)
@@ -879,6 +879,9 @@ network:
     > Specify a priority for the routing policy rule, to influence the order
     > in which routing rules are processed. A higher number means lower
     > priority: rules are processed in order by increasing priority number.
+    > Specifying an explicit, unique, priority for each routing policy rule
+    > is strongly recommended and is mandatory on the `NetworkManager`
+    > back-end.
 
   - **`mark`** (scalar)
 
@@ -891,6 +894,7 @@ network:
     > Match this policy rule based on the type of service number applied to
     > the traffic.
 
+(yaml-auth)=
 ## Authentication
 
 Netplan supports advanced authentication settings for Ethernet and Wi-Fi
@@ -906,7 +910,8 @@ interfaces, as well as individual Wi-Fi networks, by means of the `auth` block.
   - **`key-management`** (scalar)
 
     > The supported key management modes are `none` (no key management);
-    > `psk` (WPA with pre-shared key, common for home Wi-Fi); `eap` (WPA
+    > `psk` (WPA with pre-shared key, common for home Wi-Fi); `psk-sha256`
+    > (WPA2 with pre-shared key, common for home Wi-Fi); `eap` (WPA
     > with EAP, common for enterprise Wi-Fi); `eap-sha256` (used with WPA3-Enterprise);
     > `eap-suite-b-192` (used with WPA3-Enterprise); `sae` (used by WPA3);
     > and `802.1x` (used primarily for wired Ethernet connections).
@@ -1058,6 +1063,7 @@ some additional properties that can be used for SR-IOV devices.
   >
   > **Requires feature: `infiniband`**
 
+(yaml-modems)=
 ## Properties for device type `modems`
 
 **Status**: Optional.
@@ -1625,6 +1631,7 @@ The specific settings for bonds are defined below.
     > `active-backup`, `balance-alb` and `balance-tlb` modes.
 
 
+(yaml-tunnels)=
 ## Properties for device type `tunnels`
 
 **Status**: Optional.

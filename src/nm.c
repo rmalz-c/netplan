@@ -97,7 +97,7 @@ type_str(const NetplanNetDefinition* def)
             return "ip-tunnel";
         case NETPLAN_DEF_TYPE_NM:
             /* needs to be overriden by passthrough "connection.type" setting */
-            g_assert(def->backend_settings.passthrough);
+            g_assert(def->backend_settings.passthrough != NULL);
             GData *passthrough = def->backend_settings.passthrough;
             return g_datalist_get_data(&passthrough, "connection.type");
         // LCOV_EXCL_START
@@ -254,6 +254,64 @@ write_routes_nm(const NetplanNetDefinition* def, GKeyFile *kf, gint family, GErr
             j++;
         }
     }
+
+    return TRUE;
+}
+
+STATIC gboolean
+write_ip_rules_nm(const NetplanNetDefinition* def, GKeyFile *kf, gint family, GError** error)
+{
+    const gchar* group = NULL;
+    gchar* tmp_key = NULL;
+    GString* tmp_val = NULL;
+
+    if (family == AF_INET)
+        group = "ipv4";
+    else if (family == AF_INET6)
+        group = "ipv6";
+    g_assert(group != NULL);
+
+    if (def->ip_rules != NULL) {
+        for (unsigned i = 0, j = 1; i < def->ip_rules->len; ++i) {
+            const NetplanIPRule *cur_rule = g_array_index(def->ip_rules, NetplanIPRule*, i);
+
+            if (cur_rule->family != family)
+                continue;
+
+            /* NetworkManager requires that priority be specified.  This is
+             * also in-line with the iproute2 guidance that "Each rule should
+             * have an explicitly set unique priority value"[1].
+             * [1]http://www.policyrouting.org/iproute2.doc.html#ss9.6.1 */
+            if (cur_rule->priority == NETPLAN_IP_RULE_PRIO_UNSPEC) {
+                g_set_error(error, NETPLAN_BACKEND_ERROR, NETPLAN_ERROR_UNSUPPORTED,
+                            "ERROR: %s: The priority setting is mandatory for NetworkManager routing-policy\n", def->id);
+                return FALSE;
+            }
+
+            tmp_key = g_strdup_printf("routing-rule%u", j);
+            tmp_val = g_string_sized_new(200);
+
+            g_string_printf(tmp_val, "priority %u", cur_rule->priority);
+
+            if (cur_rule->from)
+                g_string_append_printf(tmp_val, " from %s", cur_rule->from);
+            if (cur_rule->to)
+                g_string_append_printf(tmp_val, " to %s", cur_rule->to);
+            if (cur_rule->tos != NETPLAN_IP_RULE_TOS_UNSPEC)
+                g_string_append_printf(tmp_val, " tos %u", cur_rule->tos);
+            if (cur_rule->fwmark != NETPLAN_IP_RULE_FW_MARK_UNSPEC)
+                g_string_append_printf(tmp_val, " fwmark %u", cur_rule->fwmark);
+            if (cur_rule->table != NETPLAN_ROUTE_TABLE_UNSPEC)
+                g_string_append_printf(tmp_val, " table %u", cur_rule->table);
+
+            g_key_file_set_string(kf, group, tmp_key, tmp_val->str);
+            g_free(tmp_key);
+            g_string_free(tmp_val, TRUE);
+
+            j++;
+        }
+    }
+
     return TRUE;
 }
 
@@ -268,7 +326,7 @@ write_nm_bond_parameters(const NetplanNetDefinition* def, GKeyFile *kf)
     if (def->bond_params.monitor_interval)
         g_key_file_set_string(kf, "bond", "miimon", def->bond_params.monitor_interval);
     if (def->bond_params.min_links)
-        g_key_file_set_integer(kf, "bond", "min_links", def->bond_params.min_links);
+        g_key_file_set_uint64(kf, "bond", "min_links", def->bond_params.min_links);
     if (def->bond_params.transmit_hash_policy)
         g_key_file_set_string(kf, "bond", "xmit_hash_policy", def->bond_params.transmit_hash_policy);
     if (def->bond_params.selection_logic)
@@ -298,17 +356,17 @@ write_nm_bond_parameters(const NetplanNetDefinition* def, GKeyFile *kf)
     if (def->bond_params.fail_over_mac_policy)
         g_key_file_set_string(kf, "bond", "fail_over_mac", def->bond_params.fail_over_mac_policy);
     if (def->bond_params.gratuitous_arp) {
-        g_key_file_set_integer(kf, "bond", "num_grat_arp", def->bond_params.gratuitous_arp);
+        g_key_file_set_uint64(kf, "bond", "num_grat_arp", def->bond_params.gratuitous_arp);
         /* Work around issue in NM where unset unsolicited_na will overwrite num_grat_arp:
          * https://github.com/NetworkManager/NetworkManager/commit/42b0bef33c77a0921590b2697f077e8ea7805166 */
-        g_key_file_set_integer(kf, "bond", "num_unsol_na", def->bond_params.gratuitous_arp);
+        g_key_file_set_uint64(kf, "bond", "num_unsol_na", def->bond_params.gratuitous_arp);
     }
     if (def->bond_params.packets_per_member)
-        g_key_file_set_integer(kf, "bond", "packets_per_slave", def->bond_params.packets_per_member); /* wokeignore:rule=slave */
+        g_key_file_set_uint64(kf, "bond", "packets_per_slave", def->bond_params.packets_per_member); /* wokeignore:rule=slave */
     if (def->bond_params.primary_reselect_policy)
         g_key_file_set_string(kf, "bond", "primary_reselect", def->bond_params.primary_reselect_policy);
     if (def->bond_params.resend_igmp)
-        g_key_file_set_integer(kf, "bond", "resend_igmp", def->bond_params.resend_igmp);
+        g_key_file_set_uint64(kf, "bond", "resend_igmp", def->bond_params.resend_igmp);
     if (def->bond_params.learn_interval)
         g_key_file_set_string(kf, "bond", "lp_interval", def->bond_params.learn_interval);
     if (def->bond_params.primary_member)
@@ -359,11 +417,11 @@ write_nm_wireguard_params(const NetplanNetDefinition* def, GKeyFile *kf, GError*
     if (def->wireguard_peers) {
         for (guint i = 0; i < def->wireguard_peers->len; i++) {
             NetplanWireguardPeer *peer = g_array_index (def->wireguard_peers, NetplanWireguardPeer*, i);
-            g_assert(peer->public_key);
+            g_assert(peer->public_key != NULL);
             g_autofree gchar* tmp_group = g_strdup_printf("wireguard-peer.%s", peer->public_key);
 
             if (peer->keepalive)
-                g_key_file_set_integer(kf, tmp_group, "persistent-keepalive", peer->keepalive);
+                g_key_file_set_uint64(kf, tmp_group, "persistent-keepalive", peer->keepalive);
             if (peer->endpoint)
                 g_key_file_set_string(kf, tmp_group, "endpoint", peer->endpoint);
 
@@ -457,6 +515,7 @@ write_wifi_auth_parameters(const NetplanAuthenticationSettings* auth, GKeyFile *
         case NETPLAN_AUTH_KEY_MANAGEMENT_NONE:
             break;
         case NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSK:
+        case NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSKSHA256:
             g_key_file_set_string(kf, "wifi-security", "key-mgmt", "wpa-psk");
             break;
         case NETPLAN_AUTH_KEY_MANAGEMENT_WPA_EAP:
@@ -510,7 +569,7 @@ maybe_generate_uuid(const NetplanNetDefinition* def)
 STATIC void
 write_nm_vxlan_parameters(const NetplanNetDefinition* def, GKeyFile* kf)
 {
-    g_assert(def->vxlan);
+    g_assert(def->vxlan != NULL);
     char uuidstr[37];
     if (def->vxlan->ageing)
         g_key_file_set_uint64(kf, "vxlan", "ageing", def->vxlan->ageing);
@@ -604,7 +663,7 @@ write_fallback_key_value(GQuark key_id, gpointer value, gpointer user_data)
     } else if (!has_key) {
         g_debug("NetworkManager: passing through fallback key: %s.%s=%s", group, k, val);
         g_key_file_set_comment(kf, group, k, "Netplan: passthrough setting", NULL);
-    } else if (!!g_strcmp0(val, old_key)) {
+    } else if (g_strcmp0(val, old_key) != 0) {
         g_debug("NetworkManager: fallback override: %s.%s=%s", group, k, val);
         g_key_file_set_comment(kf, group, k, "Netplan: passthrough override", NULL);
     }
@@ -623,7 +682,7 @@ write_fallback_key_value(GQuark key_id, gpointer value, gpointer user_data)
  *      non-wifi types.
  */
 STATIC gboolean
-write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir, const NetplanWifiAccessPoint* ap, GError** error)
+write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir, const NetplanWifiAccessPoint* ap, gboolean validation_only, GError** error)
 {
     g_autoptr(GKeyFile) kf = NULL;
     g_autofree gchar* conf_path = NULL;
@@ -637,7 +696,7 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
     const char *match_interface_name = NULL;
 
     if (def->type == NETPLAN_DEF_TYPE_WIFI)
-        g_assert(ap);
+        g_assert(ap != NULL);
     else
         g_assert(ap == NULL);
 
@@ -680,7 +739,7 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
     if (def->activation_mode) {
         /* XXX: For now NetworkManager only supports the "manual" activation
          * mode */
-        if (!!g_strcmp0(def->activation_mode, "manual")) {
+        if (g_strcmp0(def->activation_mode, "manual") != 0) {
             g_set_error(error, NETPLAN_BACKEND_ERROR, NETPLAN_ERROR_UNSUPPORTED, "ERROR: %s: NetworkManager definitions do not support activation-mode %s\n", def->id, def->activation_mode);
             return FALSE;
         }
@@ -715,6 +774,8 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
         if (def->type == NETPLAN_DEF_TYPE_VRF) {
             g_key_file_set_uint64(kf, "vrf", "table", def->vrf_table);
             if (!write_routes_nm(def, kf, AF_INET, error) || !write_routes_nm(def, kf, AF_INET6, error))
+                return FALSE;
+            if (!write_ip_rules_nm(def, kf, AF_INET, error) || !write_ip_rules_nm(def, kf, AF_INET6, error))
                 return FALSE;
         }
 
@@ -791,7 +852,7 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
             if (def->mtubytes)
                 g_key_file_set_uint64(kf, nm_type, "mtu", def->mtubytes);
             if (def->wowlan && def->wowlan > NETPLAN_WIFI_WOWLAN_DEFAULT)
-                g_key_file_set_uint64(kf, nm_type, "wake-on-wlan", def->wowlan);
+                g_key_file_set_integer(kf, nm_type, "wake-on-wlan", def->wowlan);
             if (def->ib_mode != NETPLAN_IB_MODE_KERNEL)
                 g_key_file_set_string(kf, nm_type, "transport-mode", netplan_infiniband_mode_name(def->ib_mode));
         }
@@ -871,6 +932,8 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
         write_search_domains(def, "ipv4", kf);
         if (!write_routes_nm(def, kf, AF_INET, error))
             return FALSE;
+        if (!write_ip_rules_nm(def, kf, AF_INET, error))
+            return FALSE;
     }
 
     if (!def->dhcp4_overrides.use_routes) {
@@ -878,7 +941,7 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
         g_key_file_set_boolean(kf, "ipv4", "never-default", TRUE);
     }
 
-    if (def->dhcp4 && def->dhcp4_overrides.metric != NETPLAN_METRIC_UNSPEC)
+    if ((def->dhcp4 || def->ip4_addresses || def->gateway4 || def->routes) && def->dhcp4_overrides.metric != NETPLAN_METRIC_UNSPEC)
         g_key_file_set_uint64(kf, "ipv4", "route-metric", def->dhcp4_overrides.metric);
 
     if (def->dhcp6 || def->ip6_addresses || def->gateway6 || def->ip6_nameservers || def->ip6_addr_gen_mode) {
@@ -915,6 +978,9 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
 
         /* We can only write valid routes if there is a DHCPv6 or static IPv6 address */
         if (!write_routes_nm(def, kf, AF_INET6, error))
+            return FALSE;
+
+        if (!write_ip_rules_nm(def, kf, AF_INET6, error))
             return FALSE;
 
         if (!def->dhcp6_overrides.use_routes) {
@@ -980,14 +1046,18 @@ write_nm_conf_access_point(const NetplanNetDefinition* def, const char* rootdir,
         }
     }
 
+    if (validation_only)
+        return TRUE;
+
     /* Create /run/NetworkManager/ with 755 permissions if the folder is missing.
      * Letting the next invokation of _netplan_safe_mkdir_p_dir do it would
      * result in more restrictive access because of the call to umask. */
-    nm_run_path = g_strjoin(G_DIR_SEPARATOR_S, rootdir ?: "", "run/NetworkManager/", NULL);
+    nm_run_path = g_strjoin(G_DIR_SEPARATOR_S, rootdir != NULL ? rootdir : "",
+                            "run/NetworkManager/", NULL);
     if (!g_file_test(nm_run_path, G_FILE_TEST_EXISTS))
         _netplan_safe_mkdir_p_dir(nm_run_path);
 
-    full_path = g_strjoin(G_DIR_SEPARATOR_S, rootdir ?: "", conf_path, NULL);
+    full_path = g_strjoin(G_DIR_SEPARATOR_S, rootdir != NULL ? rootdir : "", conf_path, NULL);
 
     /* NM connection files might contain secrets, and NM insists on tight permissions */
     orig_umask = umask(077);
@@ -1013,6 +1083,7 @@ _netplan_netdef_write_nm(
         GError** error)
 {
     gboolean no_error = TRUE;
+    gboolean validation_only = _netplan_state_get_flags(np_state) & NETPLAN_STATE_VALIDATION_ONLY;
 
     /* Placeholder interfaces are not supposed to be rendered */
     if (netdef->type == NETPLAN_DEF_TYPE_NM_PLACEHOLDER_)
@@ -1050,12 +1121,12 @@ _netplan_netdef_write_nm(
         if (netdef->access_points) {
             g_hash_table_iter_init(&iter, netdef->access_points);
             while (g_hash_table_iter_next(&iter, &key, (gpointer) &ap) && no_error) {
-                no_error = write_nm_conf_access_point(netdef, rootdir, ap, error);
+                no_error = write_nm_conf_access_point(netdef, rootdir, ap, validation_only, error);
             }
         }
     } else {
         g_assert(netdef->access_points == NULL);
-        no_error = write_nm_conf_access_point(netdef, rootdir, NULL, error);
+        no_error = write_nm_conf_access_point(netdef, rootdir, NULL, validation_only, error);
     }
     SET_OPT_OUT_PTR(has_been_written, TRUE);
     return no_error;
@@ -1069,6 +1140,7 @@ netplan_state_finish_nm_write(
 {
     GString* udev_rules = g_string_new(NULL);
     GString* nm_conf = g_string_new(NULL);
+    gboolean validation_only = _netplan_state_get_flags(np_state) & NETPLAN_STATE_VALIDATION_ONLY;
 
     if (netplan_state_get_netdefs_size(np_state) == 0) {
         g_string_free(udev_rules, TRUE);
@@ -1092,7 +1164,7 @@ netplan_state_finish_nm_write(
         /* Special case: manage or ignore any device of given type on empty "match: {}" stanza */
         if (nd->has_match && !nd->match.driver && !nd->match.mac && !nd->match.original_name) {
             nm_type = type_str(nd);
-            g_assert(nm_type);
+            g_assert(nm_type != NULL);
             g_string_append_printf(nm_conf, "[device-netplan.%s.%s]\nmatch-device=type:%s\n"
                                             "managed=%d\n\n", netplan_def_type_name(nd->type),
                                             netdef_id, nm_type, !unmanaged);
@@ -1160,13 +1232,13 @@ netplan_state_finish_nm_write(
     }
 
     /* write generated NetworkManager drop-in config */
-    if (nm_conf->len > 0)
+    if (nm_conf->len > 0 && !validation_only)
         _netplan_g_string_free_to_file_with_permissions(nm_conf, rootdir, "run/NetworkManager/conf.d/netplan.conf", NULL, "root", "root", 0640);
     else
         g_string_free(nm_conf, TRUE);
 
     /* write generated udev rules */
-    if (udev_rules->len > 0)
+    if (udev_rules->len > 0 && !validation_only)
         _netplan_g_string_free_to_file_with_permissions(udev_rules, rootdir, "run/udev/rules.d/90-netplan.rules", NULL, "root", "root", 0640);
     else
         g_string_free(udev_rules, TRUE);
@@ -1180,8 +1252,10 @@ netplan_state_finish_nm_write(
 gboolean
 _netplan_nm_cleanup(const char* rootdir)
 {
-    g_autofree char* confpath = g_strjoin(NULL, rootdir ?: "", "/run/NetworkManager/conf.d/netplan.conf", NULL);
-    g_autofree char* global_manage_path = g_strjoin(NULL, rootdir ?: "", "/run/NetworkManager/conf.d/10-globally-managed-devices.conf", NULL);
+    g_autofree char* confpath = g_strjoin(NULL, rootdir != NULL ? rootdir : "",
+                                          "/run/NetworkManager/conf.d/netplan.conf", NULL);
+    g_autofree char* global_manage_path = g_strjoin(NULL, rootdir != NULL ? rootdir : "",
+                                                    "/run/NetworkManager/conf.d/10-globally-managed-devices.conf", NULL);
     unlink(confpath);
     unlink(global_manage_path);
     _netplan_unlink_glob(rootdir, "/run/NetworkManager/system-connections/netplan-*");

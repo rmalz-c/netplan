@@ -24,6 +24,18 @@
 #include <glib.h>
 #include "netplan.h"
 
+#ifndef PREFIX
+#define PREFIX "/usr"
+#endif
+
+#ifndef BINDIR
+#define BINDIR "bin"
+#endif
+
+#ifndef SNAPBINDIR
+#define SNAPBINDIR "/snap/bin"
+#endif
+
 #define SET_OPT_OUT_PTR(ptr,val) { if (ptr) *ptr = val; }
 
 #define __unused __attribute__((unused))
@@ -41,7 +53,7 @@ NETPLAN_INTERNAL void
 _netplan_g_string_free_to_file(GString* s, const char* rootdir, const char* path, const char* suffix);
 
 void
-_netplan_g_string_free_to_file_with_permissions(GString* s, const char* rootdir, const char* path, const char* suffix, const char* owner, const char* group, mode_t mode);
+_netplan_g_string_free_to_file_with_permissions(GString* s, const char* rootdir, const char* path, const char* suffix, const char* owner, const char* group, int mode);
 
 NETPLAN_INTERNAL void
 _netplan_unlink_glob(const char* rootdir, const char* _glob);
@@ -56,15 +68,13 @@ const char*
 get_unspecified_address(int ip_family);
 
 int
-wifi_get_freq24(int channel);
+wifi_get_freq24(guint channel);
 
 int
-wifi_get_freq5(int channel);
+wifi_get_freq5(guint channel);
 
 gchar*
 systemd_escape(char* string);
-
-#define OPENVSWITCH_OVS_VSCTL "/usr/bin/ovs-vsctl"
 
 void
 mark_data_as_dirty(NetplanParser* npp, const void* data_ptr);
@@ -136,7 +146,7 @@ gboolean
 _is_auth_key_management_psk(const NetplanAuthenticationSettings* auth);
 
 gboolean
-_is_macaddress_special_nm_option(const char* value);
+_is_macaddress_special_nm_option(const NetplanNetDefinition* netdef, const char* value);
 
 gboolean
 _is_macaddress_special_nd_option(const char* value);

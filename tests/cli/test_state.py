@@ -19,33 +19,21 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import copy
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import call, mock_open, patch
+
 import yaml
 
-from unittest.mock import patch, call, mock_open
-from netplan_cli.cli.state import Interface, NetplanConfigState, SystemConfigState
+from netplan_cli.cli.state import (Interface, NetplanConfigState,
+                                   SystemConfigState)
+
 from .test_status import (BRIDGE, DNS_ADDRESSES, DNS_IP4, DNS_SEARCH, FAKE_DEV,
                           IPROUTE2, NETWORKD, NMCLI, ROUTE4, ROUTE6)
-
-
-class resolve1_ipc_mock():
-    def get_object(self, _foo, _bar):
-        return {}  # dbus Object
-
-
-class resolve1_iface_mock():
-    def __init__(self, _foo, _bar):
-        pass  # dbus Interface
-
-    def GetAll(self, _):
-        return {
-            'DNS': DNS_ADDRESSES,
-            'Domains': DNS_SEARCH,
-            }
 
 
 class TestSystemState(unittest.TestCase):
@@ -97,8 +85,8 @@ class TestSystemState(unittest.TestCase):
         mock.assert_called_with(['nmcli', '-t', '-f',
                                  'DEVICE,NAME,UUID,FILENAME,TYPE,AUTOCONNECT',
                                  'con', 'show'], text=True)
-        self.assertEqual(len(res), 1)
-        self.assertListEqual([itf.get('device') for itf in res], ['wlan0'])
+        self.assertEqual(len(res), 2)
+        self.assertListEqual([itf.get('device') for itf in res], ['wlan0', 'wlan1'])
 
     @patch('subprocess.check_output')
     def test_query_nm_fail(self, mock):
@@ -137,11 +125,17 @@ class TestSystemState(unittest.TestCase):
             self.assertIsNone(res6)
             self.assertIn('DEBUG:root:Cannot query iproute2 route data:', cm.output[0])
 
-    @patch('dbus.Interface')
-    @patch('dbus.SystemBus')
-    def test_query_resolved(self, mock_ipc, mock_iface):
-        mock_ipc.return_value = resolve1_ipc_mock()
-        mock_iface.return_value = resolve1_iface_mock('foo', 'bar')
+    @patch('subprocess.check_output')
+    def test_query_resolved(self, mock_busctl):
+        mock_busctl.return_value = '''{"data":[{
+        "DNS": {
+            "type": "a(iiay)",
+            "data": '''+json.dumps(DNS_ADDRESSES)+'''
+        },
+        "Domains": {
+            "type": "a(isb)",
+            "data": '''+json.dumps(DNS_SEARCH)+'''
+        }}]}'''
         addresses, search = SystemConfigState.query_resolved()
         self.assertEqual(len(addresses), 4)
         self.assertListEqual([addr[0] for addr in addresses],
@@ -150,15 +144,23 @@ class TestSystemState(unittest.TestCase):
         self.assertListEqual([s[1] for s in search],
                              ['search.domain', 'search.domain'])
 
-    @patch('dbus.SystemBus')
-    def test_query_resolved_fail(self, mock):
-        mock.return_value = resolve1_ipc_mock()
-        mock.side_effect = Exception(1, '', 'ERR')
+    @patch('subprocess.check_output')
+    def test_query_resolved_fail(self, mock_busctl):
+        mock_busctl.return_value = '{"data":[{"DNS":{"type":"invalid","data":"garbage"}}]}'
         with self.assertLogs(level='DEBUG') as cm:
             addresses, search = SystemConfigState.query_resolved()
             self.assertIsNone(addresses)
             self.assertIsNone(search)
-            self.assertIn('DEBUG:root:Cannot query resolved DNS data:', cm.output[0])
+            self.assertIn('DEBUG:root:Cannot query resolved DNS data: DNS address type doesn\'t match', cm.output[0])
+
+    @patch('shutil.which')
+    def test_query_resolved_fail_missing_busctl(self, mock):
+        mock.return_value = None
+        with self.assertLogs(level='DEBUG') as cm:
+            addresses, search = SystemConfigState.query_resolved()
+            self.assertIsNone(addresses)
+            self.assertIsNone(search)
+            self.assertIn('DEBUG:root:Cannot query resolved DNS data: missing busctl utility', cm.output[0])
 
     def test_query_resolvconf(self):
         with patch('builtins.open', mock_open(read_data='''\
@@ -414,6 +416,61 @@ class TestInterface(unittest.TestCase):
         self.assertEqual(len(json.get('dns_addresses')), 2)
         self.assertEqual(len(json.get('dns_search')), 1)
         self.assertEqual(len(json.get('routes')), 6)
+
+    @patch('netplan_cli.cli.state.Interface.query_nm_ssid')
+    @patch('netplan_cli.cli.state.Interface.query_networkctl')
+    def test_json_nm_wlan0_2(self, networkctl_mock, nm_ssid_mock):
+        SSID = 'MYCON'
+        nm_ssid_mock.return_value = SSID
+        # networkctl mock output reduced to relevant lines
+        # Newer versions of systemd changed WiFi to Wi-Fi
+        # See systemd commit 8fff78a1dded105e1ee87bc66e29ef2fd61bf8c9
+        networkctl_mock.return_value = \
+            'Wi-Fi access point: {} (b4:fb:e4:75:c6:21)'.format(SSID)
+
+        data = next((itf for itf in yaml.safe_load(IPROUTE2) if itf['ifindex'] == 5), {})
+        nd = SystemConfigState.process_networkd(NETWORKD)
+        nm = SystemConfigState.process_nm(NMCLI)
+        dns = (DNS_ADDRESSES, DNS_SEARCH)
+        routes = (SystemConfigState.process_generic(ROUTE4), SystemConfigState.process_generic(ROUTE6))
+
+        itf = Interface(data, nd, nm, dns, routes)
+        _, json = itf.json()
+        self.assertEqual(json.get('ssid'), 'MYCON')
+
+    @patch('netplan_cli.cli.state.Interface.query_nm_ssid')
+    @patch('netplan_cli.cli.state.Interface.query_networkctl')
+    def test_json_nd_wlan1_non_ascii(self, networkctl_mock, nm_ssid_mock):
+        ND_SSID = '\\303\\241\\303\\251\\303\\255\\303\\263\\303\\272\\302\\242\\302\\242\\302\\242\\302\\243\\302\\243\\302\\243'
+        NM_SSID = 'áéíóú¢¢¢£££'
+        nm_ssid_mock.return_value = NM_SSID
+        # networkctl mock output reduced to relevant lines
+        # Newer versions of systemd changed WiFi to Wi-Fi
+        # See systemd commit 8fff78a1dded105e1ee87bc66e29ef2fd61bf8c9
+        networkctl_mock.return_value = \
+            'Wi-Fi access point: {} (b4:fb:e4:75:c6:21)'.format(ND_SSID)
+
+        data = {'ifname': 'wlan1', 'ifindex': 123}
+        nd = [{'Index': 123, 'Type': 'wlan', 'Name': 'wlan1', 'SetupState': 'managed',
+               'NetworkFile': '/run/systemd/network/10-netplan-wlan1.network'}]
+        nm = SystemConfigState.process_nm(NMCLI)
+
+        itf = Interface(data, nd, nm, (None, None), (None, None))
+        _, json = itf.json()
+        self.assertEqual(json.get('ssid'), NM_SSID)
+
+    @patch('netplan_cli.cli.state.Interface.query_nm_ssid')
+    def test_json_nm_wlan1_non_ascii(self, nm_ssid_mock):
+        NM_SSID = 'áéíóú¢¢¢£££'
+        nm_ssid_mock.return_value = NM_SSID
+
+        data = {'ifname': 'wlan1', 'ifindex': 123}
+        nd = [{'Index': 123, 'Type': 'wlan', 'Name': 'wlan1', 'SetupState': 'unmanaged'}]
+        nm = SystemConfigState.process_nm(NMCLI)
+
+        itf = Interface(data, nd, nm, (None, None), (None, None))
+        _, json = itf.json()
+        self.assertEqual(json.get('ssid'), NM_SSID)
 
     @patch('netplan_cli.cli.state.Interface.query_networkctl')
     def test_json_nd_enp0s31f6(self, networkctl_mock):

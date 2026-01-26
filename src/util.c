@@ -80,7 +80,7 @@ void _netplan_g_string_free_to_file(GString* s, const char* rootdir, const char*
     GError* error = NULL;
 
     path_suffix = g_strjoin(NULL, path, suffix, NULL);
-    full_path = g_build_path(G_DIR_SEPARATOR_S, rootdir ?: G_DIR_SEPARATOR_S, path_suffix, NULL);
+    full_path = g_build_path(G_DIR_SEPARATOR_S, rootdir != NULL ? rootdir : G_DIR_SEPARATOR_S, path_suffix, NULL);
     _netplan_safe_mkdir_p_dir(full_path);
     if (!g_file_set_contents(full_path, contents, -1, &error)) {
         /* the mkdir() just succeeded, there is no sensible
@@ -93,7 +93,7 @@ void _netplan_g_string_free_to_file(GString* s, const char* rootdir, const char*
     }
 }
 
-void _netplan_g_string_free_to_file_with_permissions(GString* s, const char* rootdir, const char* path, const char* suffix, const char* owner, const char* group, mode_t mode)
+void _netplan_g_string_free_to_file_with_permissions(GString* s, const char* rootdir, const char* path, const char* suffix, const char* owner, const char* group, int mode)
 {
     g_autofree char* full_path = NULL;
     g_autofree char* path_suffix = NULL;
@@ -104,7 +104,7 @@ void _netplan_g_string_free_to_file_with_permissions(GString* s, const char* roo
     int ret = 0;
 
     path_suffix = g_strjoin(NULL, path, suffix, NULL);
-    full_path = g_build_path(G_DIR_SEPARATOR_S, rootdir ?: G_DIR_SEPARATOR_S, path_suffix, NULL);
+    full_path = g_build_path(G_DIR_SEPARATOR_S, rootdir != NULL ? rootdir : G_DIR_SEPARATOR_S, path_suffix, NULL);
     _netplan_safe_mkdir_p_dir(full_path);
     if (!g_file_set_contents_full(full_path, contents, -1, G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_ONLY_EXISTING, mode, &error)) {
         /* the mkdir() just succeeded, there is no sensible
@@ -144,7 +144,7 @@ _netplan_unlink_glob(const char* rootdir, const char* _glob)
 {
     glob_t gl;
     int rc;
-    g_autofree char* rglob = g_strjoin(NULL, rootdir ?: "", G_DIR_SEPARATOR_S, _glob, NULL);
+    g_autofree char* rglob = g_strjoin(NULL, rootdir != NULL ? rootdir : "", G_DIR_SEPARATOR_S, _glob, NULL);
 
     rc = glob(rglob, GLOB_BRACE, NULL, &gl);
     if (rc != 0 && rc != GLOB_NOMATCH) {
@@ -166,8 +166,8 @@ int _netplan_find_yaml_glob(const char* rootdir, glob_t* out_glob)
 {
     int rc;
     g_autofree char* rglob = g_build_path(G_DIR_SEPARATOR_S,
-                                          rootdir ?: G_DIR_SEPARATOR_S,
-                                          "{lib,etc,run}/netplan/*.yaml", NULL);
+                                          rootdir != NULL ? rootdir : G_DIR_SEPARATOR_S,
+                                          "{lib,etc,run}", "netplan", "*.yaml", NULL);
     rc = glob(rglob, GLOB_BRACE, NULL, out_glob);
     if (rc != 0 && rc != GLOB_NOMATCH) {
         // LCOV_EXCL_START
@@ -440,7 +440,7 @@ cleanup:
  * Get the frequency of a given 2.4GHz WiFi channel
  */
 int
-wifi_get_freq24(int channel)
+wifi_get_freq24(guint channel)
 {
     if (channel < 1 || channel > 14) {
         g_fprintf(stderr, "ERROR: invalid 2.4GHz WiFi channel: %d\n", channel);
@@ -466,9 +466,9 @@ wifi_get_freq24(int channel)
  * Get the frequency of a given 5GHz WiFi channel
  */
 int
-wifi_get_freq5(int channel)
+wifi_get_freq5(guint channel)
 {
-    int channels[] = { 7, 8, 9, 11, 12, 16, 32, 34, 36, 38, 40, 42, 44, 46, 48,
+    guint channels[] = { 7, 8, 9, 11, 12, 16, 32, 34, 36, 38, 40, 42, 44, 46, 48,
                        50, 52, 54, 56, 58, 60, 62, 64, 68, 96, 100, 102, 104,
                        106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126,
                        128, 132, 134, 136, 138, 140, 142, 144, 149, 151, 153,
@@ -651,7 +651,8 @@ netplan_get_id_from_nm_filepath(const char* filename, const char* ssid, char* ou
 
     /* Move pointer to start of netplan ID inside filename string */
     start = pos + strlen(nm_prefix);
-    id_len = end - start;
+    g_assert(end - start > 0);
+    id_len = (gsize)(end - start);
 
     if (out_buf_size < id_len + 1)
         return NETPLAN_BUFFER_TOO_SMALL;
@@ -659,7 +660,8 @@ netplan_get_id_from_nm_filepath(const char* filename, const char* ssid, char* ou
     strncpy(out_buffer, start, id_len);
     out_buffer[id_len] = '\0';
 
-    return id_len + 1;
+    g_assert(id_len + 1 <= G_MAXLONG);
+    return (ssize_t)id_len + 1;
 }
 
 ssize_t
@@ -1001,7 +1003,8 @@ netplan_copy_string(const char* input, char* out_buffer, size_t out_size)
     char* end = stpncpy(out_buffer, input, out_size);
     // If it point to the first byte past the buffer, we don't have enough
     // space in the buffer.
-    size_t len = end - out_buffer;
+    g_assert(end - out_buffer >= 0);
+    size_t len = (size_t)(end - out_buffer);
     if (len == out_size)
         return NETPLAN_BUFFER_TOO_SMALL;
     return end - out_buffer + 1;
@@ -1014,20 +1017,23 @@ netplan_netdef_match_interface(const NetplanNetDefinition* netdef, const char* n
         return !g_strcmp0(name, netdef->id);
 
     if (netdef->match.mac) {
-        if (g_ascii_strcasecmp(netdef->match.mac ?: "", mac ?: ""))
+        if (g_ascii_strcasecmp(netdef->match.mac != NULL ? netdef->match.mac : "", mac != NULL ? mac : "")) {
             return FALSE;
+        }
     }
 
     if (netdef->match.original_name) {
-        if (!name || fnmatch(netdef->match.original_name, name, 0))
+        if (!name || fnmatch(netdef->match.original_name, name, 0)) {
             return FALSE;
+        }
     }
 
     if (netdef->match.driver) {
         gboolean matches_driver = FALSE;
         char** tokens;
-        if (!driver_name)
+        if (!driver_name) {
             return FALSE;
+        }
         tokens = g_strsplit(netdef->match.driver, "\t", -1);
         for (char** it = tokens; *it; it++) {
             if (fnmatch(*it, driver_name, 0) == 0) {
@@ -1116,7 +1122,7 @@ is_multicast_address(const char* address)
 void
 netplan_state_iterator_init(const NetplanState* np_state, NetplanStateIterator* iter)
 {
-    g_assert(iter);
+    g_assert(iter != NULL);
     RealStateIter* _iter = (RealStateIter*) iter;
     _iter->next = g_list_first(np_state->netdefs_ordered);
 }
@@ -1178,8 +1184,8 @@ is_route_present(const NetplanNetDefinition* netdef, const NetplanIPRoute* route
                 entry->table == route->table &&
                 entry->metric == route->metric &&
                 g_strcmp0(entry->from, route->from) == 0 &&
-                g_strcmp0(normalize_ip_address(entry->to, entry->family),
-                    normalize_ip_address(route->to, route->family)) == 0 &&
+                g_strcmp0(normalize_ip_address(entry->to, (guint)entry->family),
+                    normalize_ip_address(route->to, (guint)route->family)) == 0 &&
                 g_strcmp0(entry->via, route->via) == 0
            )
             return TRUE;
@@ -1229,16 +1235,18 @@ gboolean
 _is_auth_key_management_psk(const NetplanAuthenticationSettings* auth)
 {
     return (   auth->key_management == NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSK
+            || auth->key_management == NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSKSHA256
             || auth->key_management == NETPLAN_AUTH_KEY_MANAGEMENT_WPA_SAE);
 }
 
 gboolean
-_is_macaddress_special_nm_option(const char* value)
+_is_macaddress_special_nm_option(const NetplanNetDefinition* netdef, const char* value)
 {
     return (   !g_strcmp0(value, "preserve")
             || !g_strcmp0(value, "permanent")
             || !g_strcmp0(value, "random")
-            || !g_strcmp0(value, "stable"));
+            || !g_strcmp0(value, "stable")
+            || (!g_strcmp0(value, "stable-ssid") && netdef->type == NETPLAN_DEF_TYPE_WIFI));
 }
 
 gboolean

@@ -1505,6 +1505,57 @@ method=auto
         name: "test2"
 '''.format(UUID, UUID)})
 
+    def test_keyfile_wpa_sha256(self):
+        self.generate_from_keyfile('''[connection]
+id=test2
+uuid={}
+type=wifi
+interface-name=wlan0
+
+[wifi]
+mode=infrastructure
+ssid=ubuntu-wpa-sha256
+
+[wifi-security]
+key-mgmt=wpa-psk
+pmf=2
+psk=test1234
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=stable-privacy
+method=auto
+
+[proxy]
+'''.format(UUID))
+        self.assert_netplan({UUID: '''network:
+  version: 2
+  wifis:
+    NM-{}:
+      renderer: NetworkManager
+      match:
+        name: "wlan0"
+      dhcp4: true
+      dhcp6: true
+      ipv6-address-generation: "stable-privacy"
+      access-points:
+        "ubuntu-wpa-sha256":
+          auth:
+            key-management: "psk-sha256"
+            password: "test1234"
+          networkmanager:
+            uuid: "ff9d6ebc-226d-4f82-a485-b7ff83b9607f"
+            name: "test2"
+            passthrough:
+              ipv6.ip6-privacy: "-1"
+              proxy._: ""
+      networkmanager:
+        uuid: "{}"
+        name: "test2"
+'''.format(UUID, UUID)})
+
     def test_keyfile_wpa3_enterprise_eap_sha256(self):
         self.generate_from_keyfile('''[connection]
 id=test2
@@ -2426,5 +2477,87 @@ method=auto
           ipv4.dns: "8.8.8.8;1.1.1.1#lxd;192.168.0.1#domain.local;"
           ipv6.addr-gen-mode: "default"
           ipv6.ip6-privacy: "-1"
+          proxy._: ""
+'''.format(UUID, UUID)})
+
+    def test_ipv4_route_metric_is_overriden_when_dhcp4_is_disabled(self):
+        self.generate_from_keyfile('''[connection]
+id=dummy-123
+type=dummy
+uuid={}
+interface-name=dummy123
+
+[ipv4]
+method=manual
+address1=100.85.0.1/24,100.85.0.1
+route-metric=95
+
+[ipv6]
+method=ignore
+addr-gen-mode=default
+
+[dummy]
+
+[proxy]\n'''.format(UUID))
+        self.assert_netplan({UUID: '''network:
+  version: 2
+  dummy-devices:
+    NM-{}:
+      renderer: NetworkManager
+      addresses:
+      - "100.85.0.1/24"
+      dhcp4-overrides:
+        route-metric: 95
+      networkmanager:
+        uuid: "{}"
+        name: "dummy-123"
+        passthrough:
+          connection.interface-name: "dummy123"
+          ipv4.method: "manual"
+          ipv4.address1: "100.85.0.1/24,100.85.0.1"
+          ipv6.addr-gen-mode: "default"
+          dummy._: ""
+          proxy._: ""
+'''.format(UUID, UUID)})
+
+    def test_ipv6_route_metric_is_overriden_when_dhcp6_is_disabled(self):
+        self.generate_from_keyfile('''[connection]
+id=dummy-123
+type=dummy
+uuid={}
+interface-name=dummy123
+
+[ipv4]
+method=disabled
+
+[ipv6]
+method=manual
+address1=fdeb:446c:912d:8da::/64,fdeb:446c:912d:8da::1
+route-metric=95
+addr-gen-mode=default
+
+[dummy]
+
+[proxy]\n'''.format(UUID))
+        self.assert_netplan({UUID: '''network:
+  version: 2
+  dummy-devices:
+    NM-{}:
+      renderer: NetworkManager
+      addresses:
+      - "fdeb:446c:912d:8da::/64"
+      dhcp6-overrides:
+        route-metric: 95
+      networkmanager:
+        uuid: "{}"
+        name: "dummy-123"
+        passthrough:
+          connection.interface-name: "dummy123"
+          ipv4.method: "disabled"
+          ipv6.method: "manual"
+          ipv6.address1: "fdeb:446c:912d:8da::/64,fdeb:446c:912d:8da::1"
+          ipv6.addr-gen-mode: "default"
+          ipv6.ip6-privacy: "-1"
+          dummy._: ""
           proxy._: ""
 '''.format(UUID, UUID)})

@@ -137,12 +137,12 @@ network={
             self.assertIn('country=DE\n', new_config)
             self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o600)
         self.assertTrue(os.path.isfile(os.path.join(
-            self.workdir.name, 'run/systemd/system/netplan-wpa-wl0.service')))
-        with open(os.path.join(self.workdir.name, 'run/systemd/system/netplan-wpa-wl0.service')) as f:
+            self.generator_late_dir, 'netplan-wpa-wl0.service')))
+        with open(os.path.join(self.generator_late_dir, 'netplan-wpa-wl0.service')) as f:
             self.assertEqual(f.read(), SD_WPA % {'iface': 'wl0', 'drivers': 'nl80211,wext'})
-            self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o640)
+            self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o644)
         self.assertTrue(os.path.islink(os.path.join(
-            self.workdir.name, 'run/systemd/system/systemd-networkd.service.wants/netplan-wpa-wl0.service')))
+            self.generator_late_dir, 'systemd-networkd.service.wants/netplan-wpa-wl0.service')))
 
     def test_wifi_route(self):
         self.generate('''network:
@@ -238,9 +238,9 @@ network={
 ''', new_config)
             self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o600)
         self.assertTrue(os.path.isfile(os.path.join(
-            self.workdir.name, 'run/systemd/system/netplan-wpa-wl0.service')))
+            self.generator_late_dir, 'netplan-wpa-wl0.service')))
         self.assertTrue(os.path.islink(os.path.join(
-            self.workdir.name, 'run/systemd/system/systemd-networkd.service.wants/netplan-wpa-wl0.service')))
+            self.generator_late_dir, 'systemd-networkd.service.wants/netplan-wpa-wl0.service')))
 
     def test_wifi_wowlan_default(self):
         self.generate('''network:
@@ -271,9 +271,30 @@ network={
 ''', new_config)
             self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o600)
         self.assertTrue(os.path.isfile(os.path.join(
-            self.workdir.name, 'run/systemd/system/netplan-wpa-wl0.service')))
+            self.generator_late_dir, 'netplan-wpa-wl0.service')))
         self.assertTrue(os.path.islink(os.path.join(
-            self.workdir.name, 'run/systemd/system/systemd-networkd.service.wants/netplan-wpa-wl0.service')))
+            self.generator_late_dir, 'systemd-networkd.service.wants/netplan-wpa-wl0.service')))
+
+    def test_wifi_wpa_sha256(self):
+        self.generate('''network:
+  version: 2
+  wifis:
+    wl0:
+      access-points:
+        homenet:
+          auth:
+            key-management: psk-sha256
+            password: "********"''')
+
+        self.assert_wpa_supplicant("wl0", """ctrl_interface=/run/wpa_supplicant
+
+network={
+  ssid=P"homenet"
+  key_mgmt=WPA-PSK WPA-PSK-SHA256
+  ieee80211w=1
+  psk="********"
+}
+""")
 
     def test_wifi_wpa3_personal(self):
         self.generate('''network:
@@ -794,6 +815,39 @@ network={
 }
 """)
 
+    def test_wifi_wpa_sha256(self):
+        self.generate('''network:
+  version: 2
+  renderer: NetworkManager
+  wifis:
+    wl0:
+      access-points:
+        homenet:
+          auth:
+            key-management: psk-sha256
+            password: "********"''')
+
+        self.assert_nm({'wl0-homenet': '''[connection]
+id=netplan-wl0-homenet
+type=wifi
+interface-name=wl0
+
+[ipv4]
+method=link-local
+
+[ipv6]
+method=ignore
+
+[wifi]
+ssid=homenet
+mode=infrastructure
+
+[wifi-security]
+key-mgmt=wpa-psk
+pmf=2
+psk=********
+'''})
+
     def test_wifi_wpa3_personal(self):
         self.generate('''network:
   version: 2
@@ -1110,9 +1164,45 @@ mode=infrastructure
         with open(os.path.join(self.workdir.name, 'run/netplan/wpa-wl1.conf')) as f:
             new_config = f.read()
             self.assertIn('country=DE\n', new_config)
-        with open(os.path.join(self.workdir.name, 'run/systemd/system/netplan-regdom.service')) as f:
+        with open(os.path.join(self.generator_late_dir, 'netplan-regdom.service')) as f:
             new_config = f.read()
             self.assertIn('ExecStart=/usr/sbin/iw reg set DE\n', new_config)
+
+    def test_wlan_set_mac_special_values(self):
+        self.generate('''network:
+  version: 2
+  renderer: NetworkManager
+  wifis:
+    wlan0:
+      macaddress: stable-ssid
+      dhcp4: true
+      access-points:
+        "mynetwork":
+          password: mypassword''')
+
+        self.assert_networkd(None)
+
+        self.assert_nm({'wlan0-mynetwork': '''[connection]
+id=netplan-wlan0-mynetwork
+type=wifi
+interface-name=wlan0
+
+[wifi]
+cloned-mac-address=stable-ssid
+ssid=mynetwork
+mode=infrastructure
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=ignore
+
+[wifi-security]
+key-mgmt=wpa-psk
+pmf=2
+psk=mypassword
+'''})
 
 
 class TestConfigErrors(TestBase):

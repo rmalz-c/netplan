@@ -1,12 +1,12 @@
 project('netplan', 'c',
-        version: '1.0',
+        version: '1.1',
         license: 'GPL3',
         default_options: [
             'c_std=c99',
             'warning_level=2',
             'werror=true',
         ],
-        meson_version: '>= 0.61.0',
+        meson_version: '>= 1.3.0',
 )
 
 glib = dependency('glib-2.0')
@@ -32,7 +32,10 @@ find = find_program('find')
 
 add_project_arguments(
     '-DSBINDIR="' + join_paths(get_option('prefix'), get_option('sbindir')) + '"',
+    '-DPREFIX="' + get_option('prefix') + '"',
+    '-DBINDIR="' + get_option('bindir') + '"',
     '-D_GNU_SOURCE',
+    '-Wconversion',
     language: 'c')
 
 inc = include_directories('include')
@@ -58,6 +61,12 @@ install_data(
     rename: 'netplan',
     install_dir: bash_completions_dir)
 
+service_dir = systemd.get_pkgconfig_variable('systemdsystemunitdir')
+# XXX: should we use configure_file() instead?
+install_data(
+    'netplan-configure.service',
+    install_dir: service_dir)
+
 ###########
 # Testing #
 ###########
@@ -65,6 +74,7 @@ test_env = [
     'PYTHONPATH=' + join_paths(meson.current_build_dir(), 'python-cffi') + ':' + meson.current_source_dir(),
     'LD_LIBRARY_PATH=' + join_paths(meson.current_build_dir(), 'src'),
     'NETPLAN_GENERATE_PATH=' + join_paths(meson.current_build_dir(), 'src', 'generate'),
+    'NETPLAN_CONFIGURE_PATH=' + join_paths(meson.current_build_dir(), 'src', 'configure'),
     'NETPLAN_DBUS_CMD=' + join_paths(meson.current_build_dir(), 'dbus', 'netplan-dbus'),
     'COVERAGE_PROCESS_START=' + join_paths(meson.current_source_dir(), '.coveragerc'),
     'G_DEBUG=fatal_criticals',
@@ -137,6 +147,12 @@ if get_option('testing')
              args: ['html', '-d', join_paths(meson.current_build_dir(),
                     'meson-logs', 'coveragereport-py'), '--omit=/usr/*'],
              priority: -95, # run before 'coverage-py'
+             is_parallel: false)
+        test('coverage-py-output-xml',
+             pycoverage,
+             args: ['xml', '-o', join_paths(meson.current_build_dir(),
+                    'meson-logs', 'coverage-py.xml'), '--omit=/usr/*'],
+             priority: -96, # run before 'coverage-py'
              is_parallel: false)
         test('coverage-py',
              pycoverage,

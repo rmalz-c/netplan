@@ -16,7 +16,7 @@ on:
 jobs:
   lxd-network-manager:
     # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -33,16 +33,18 @@ jobs:
       # it's needed (will be auto-loaded) by routing.test_vrf_basic
       - name: Install dependencies
         run: |
+          sudo add-apt-repository -y -n -s ppa:slyon/netplan-ci
           sudo apt update
-          sudo apt install autopkgtest ubuntu-dev-tools devscripts openvswitch-switch linux-modules-extra-$(uname -r)
+          sudo apt install autopkgtest dnsmasq-base ubuntu-dev-tools devscripts openvswitch-switch linux-modules-extra-$(uname -r)
       - name: Prepare test
         run: |
           pull-lp-source netplan.io
           cp -r netplan.io-*/debian .
           rm -r debian/patches/  # clear any distro patches
-          # usrmerge-fix
-          sed -i 's|rm debian/tmp/lib/netplan/generate|sh -c "mkdir -p debian/tmp/usr/lib/systemd/system-generators; rm -rf debian/tmp/lib; ln -sf /usr/libexec/netplan/generate debian/tmp/usr/lib/systemd/system-generators/netplan"|' debian/rules
-          # usrmerge-fix-end
+          sed -i 's|systemd (>= 258~),|systemd (>= 248~),|g' debian/control  # see https://github.com/canonical/netplan/pull/535
+          echo 'usr/libexec/netplan/configure' >> debian/netplan-generator.install
+          echo 'usr/lib/systemd/system/netplan-configure.service' >> debian/netplan-generator.install
+          sed -i 's|libexec/netplan/generate|libexec/netplan/configure|g' debian/netplan-generator.postinst
           echo "3.0 (native)" > debian/source/format  # force native build
           TAG=$(git describe --tags $(git rev-list --tags --max-count=1))  # find latest (stable) tag
           REV=$(git rev-parse --short HEAD)  # get current git revision
@@ -60,15 +62,13 @@ jobs:
       # work around LP: #1878225 as fallback
       - name: Preparing autopkgtest-build-lxd
         run: |
-          sudo patch /usr/bin/autopkgtest-build-lxd .github/workflows/snapd.patch
+          sudo patch /usr/share/autopkgtest/lib/build-lxd.sh .github/workflows/snapd.patch
           MIRROR=http://archive.ubuntu.com/ubuntu autopkgtest-build-lxd ubuntu-daily:noble # LP: #2052639
       - name: Run autopkgtest
         run: |
-          # using --setup-commands temporarily to install:
-          # cmocka/pytest/rich/ethtool until they become proper test-deps
-          pull-lp-source network-manager noble
+          # When we introduce ABI breaking changes, we need to rebuild NM in DEP-8
+          #pull-lp-source network-manager noble
           sudo autopkgtest -U \
-            --copy=debian/artifacts:/root/ --setup-commands='dpkg -i /root/*.deb' \
             --env=DEB_BUILD_OPTIONS=nocheck \
             --apt-pocket=proposed=src:network-manager \
-            network-manager_*.dsc -- lxd autopkgtest/ubuntu/noble/amd64 || test $? -eq 2  # allow for skipped tests (exit code = 2)
+            debian/artifacts/*.deb network-manager -- lxd autopkgtest/ubuntu/noble/amd64 || test $? -eq 2  # allow for skipped tests (exit code = 2)

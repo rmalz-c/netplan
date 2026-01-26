@@ -50,7 +50,7 @@ class NetplanTry(utils.NetplanCommand):
         self.t_settings = None
         self.t = None
         self._rootdir = os.environ.get('DBUS_TEST_NETPLAN_ROOT', '/')
-        self._netplan_try_stamp = os.path.join(self._rootdir, 'run', 'netplan', 'netplan-try.ready')
+        self._netplan_try_stamp = os.path.join(self._rootdir, self.try_ready_stamp)
 
     @property
     def config_manager(self):  # pragma: nocover (called by later commands)
@@ -139,7 +139,7 @@ class NetplanTry(utils.NetplanCommand):
         tempdir = tempfile.mkdtemp()
         confdir = os.path.join(tempdir, 'etc', 'netplan')
         os.makedirs(confdir)
-        shutil.copytree('/etc/netplan', confdir, dirs_exist_ok=True)
+        self.config_manager.copy_tree('/etc/netplan', confdir, dirs_exist_ok=True)
         # restore previous state
         self.config_manager.revert()
         NetplanApply().command_apply(run_generate=False, sync=True, exit_on_error=False, state_dir=tempdir)

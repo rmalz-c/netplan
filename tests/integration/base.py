@@ -21,19 +21,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import os
-import sys
-import re
-import time
-import subprocess
-import tempfile
-import unittest
-import shutil
-import gi
 import glob
-import json
-import pwd
 import grp
+import ipaddress
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import pathlib
+
+import gi
 
 # make sure we point to libnetplan properly.
 os.environ.update({'LD_LIBRARY_PATH': '.:{}'.format(os.environ.get('LD_LIBRARY_PATH'))})
@@ -50,6 +53,23 @@ nm_uses_dnsmasq = b'dns=dnsmasq' in subprocess.check_output(['NetworkManager', '
 
 def resolved_in_use():
     return os.path.isfile('/run/systemd/resolve/resolv.conf')
+
+
+def mac_to_eui64(hwaddr: str) -> ipaddress.IPv6Address:
+    '''
+    Calculate a EUI-64 IPv6 address from a MAC, according to RFC-4291,
+    e.g.: https://www.geeksforgeeks.org/ipv6-eui-64-extended-unique-identifier
+    '''
+    # convert MAC address bytes to a list of base10 decimals
+    mac_addr = [int(h, base=16) for h in hwaddr.split(':')]
+    mac_addr[0] ^= 2  # flip 7th bit of the 1st byte, e.g. XOR 0b00000010 (=2)
+    # inject 0xFFFE in the middle, increasing 48bit MAC to 64bit IPv6 Interface ID
+    mac_addr[3:3] = [0xff, 0xfe]
+    # apply 64bit IPv6 Interface ID on generic IPv6 carrier address (2600::)
+    eui_addr_int = 0x26000000000000000000000000000000
+    for i, h in enumerate(reversed(mac_addr)):
+        eui_addr_int |= h << 8 * i
+    return ipaddress.IPv6Address(eui_addr_int)
 
 
 class IntegrationTestsBase(unittest.TestCase):
@@ -144,11 +164,18 @@ class IntegrationTestsBase(unittest.TestCase):
         subprocess.check_call(['ip', 'link', 'add', 'name', 'eth43', 'type',
                                'veth', 'peer', 'name', 'veth43'])
 
-        # Creation of the veths introduces a race with newer versions of
-        # systemd, as it  will change the initial MAC address after the device
-        # was created and networkd took control. Give it some time, so we read
-        # the correct MAC address
-        time.sleep(0.1)
+        # systemd-udevd uses "MACAddressPolicy=permanent" by default in
+        # /usr/lib/systemd/network/99-default.link
+        # When a new veth device is created via iproute2 ("ip link add ..."),
+        # the kernel assigns a MAC address. Once udev picks up the interface, it
+        # will apply this default policy. But as veths cannot (by nature) have
+        # a permanent MAC, udev will create a random (but persistent) MAC,
+        # changing the kernel MAC.
+        # Let's trigger out test interfaces and wait for settlement of those
+        # uevents to avoid race conditions between the MAC assigned by the
+        # kernel on veth creation and the pseudo "permanent" MAC from udev.
+        subprocess.check_call(['udevadm', 'trigger', '--settle', '/sys/class/net/eth42'])
+        subprocess.check_call(['udevadm', 'trigger', '--settle', '/sys/class/net/eth43'])
         out = subprocess.check_output(['ip', '-br', 'link', 'show', 'dev', 'eth42'],
                                       text=True)
         klass.dev_e_client_mac = out.split()[2]
@@ -190,6 +217,9 @@ class IntegrationTestsBase(unittest.TestCase):
         self.workdir = self.workdir_obj.name
         self.config = '/etc/netplan/01-main.yaml'
         os.makedirs('/etc/netplan', exist_ok=True)
+        # prepare common config file with proper permissions
+        pathlib.Path(self.config).touch()
+        os.chmod(self.config, 0o600)
 
         # create static entropy file to avoid draining/blocking on /dev/random
         self.entropy_file = os.path.join(self.workdir, 'entropy')
@@ -350,6 +380,49 @@ class IntegrationTestsBase(unittest.TestCase):
 
         if 'Run \'systemctl daemon-reload\' to reload units.' in out:
             print('\nWARNING: systemd units changed without reload:', out)
+
+        self.settle(wait_interfaces, state_dir)
+
+    def try_and_settle(self, try_func, wait_interfaces_try=None, wait_interfaces_after=None):
+        '''Run `netplan try`, wait for the configuration to apply, run `try_func` and allow try to time out'''
+
+        # Because `netplan try` uses select(2) to implement the timeout, stdin
+        # needs to be a stream that is never ready to read.
+        # Use mkstemp to avoid prior failures' leftovers.
+        (fifo_tmp, fifo_path) = tempfile.mkstemp(prefix="netplan-try-test")
+        os.close(fifo_tmp)
+        os.unlink(fifo_path)
+
+        os.mkfifo(fifo_path)
+        fifo = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+
+        try:
+            timeout = 10
+
+            proc = subprocess.Popen(["netplan", "try", f"--timeout={timeout}"], stdin=fifo)
+
+            # wait for apply to finish
+            wait_duration = 0
+            while not pathlib.Path("/run/netplan/netplan-try.ready").exists():
+                wait_duration += 0.1
+                time.sleep(0.1)
+
+                if wait_duration > timeout:
+                    break
+
+            self.settle(wait_interfaces=wait_interfaces_try)
+
+            try_func()
+
+            proc.wait()
+            self.settle(wait_interfaces=wait_interfaces_after)
+        finally:
+            # don't step on other tests
+            proc.wait()
+            os.close(fifo)
+            os.unlink(fifo_path)
+
+    def settle(self, wait_interfaces=None, state_dir=None):
         # start NM so that we can verify that it does not manage anything
         subprocess.call(['nm-online', '-sxq'])  # Wait for NM startup, from 'netplan apply'
         if not self.is_active('NetworkManager.service'):
@@ -387,7 +460,7 @@ class IntegrationTestsBase(unittest.TestCase):
         nd_expected_owner = 'root'
         nd_expected_group = 'systemd-network'
 
-        sd_expected_mode = 0o100640
+        sd_expected_mode = 0o100644
         sd_expected_owner = 'root'
         sd_expected_group = 'root'
 
@@ -437,9 +510,10 @@ class IntegrationTestsBase(unittest.TestCase):
             self.assertEqual(group.gr_name, wpa_expected_group, f'file {file}')
 
         # Check systemd service unit files
-        base_path = '/run/systemd/system/'
+        base_path = '/run/systemd/generator.late/'
         files = glob.glob(f'{base_path}/netplan-*.service')
         files += glob.glob(f'{base_path}/systemd-networkd-wait-online.service.d/*.conf')
+        self.assertTrue(files, 'No Netplan service files found in %s' % base_path)
         for file in files:
             res = os.stat(file)
             user = pwd.getpwuid(res.st_uid)
@@ -539,7 +613,8 @@ class IntegrationTestsWifi(IntegrationTestsBase):
     @classmethod
     def setUpClass(klass):
         super().setUpClass()
-        # ensure we have this so that iw works
+        klass.orig_country = None
+        # ensure we have cfg80211 so that iw works
         try:
             subprocess.check_call(['modprobe', 'cfg80211'])
             # set regulatory domain "EU", so that we can use 80211.a 5 GHz channels
@@ -548,20 +623,34 @@ class IntegrationTestsWifi(IntegrationTestsBase):
             assert m
             klass.orig_country = m.group(1)
             subprocess.check_call(['iw', 'reg', 'set', 'EU'])
-        except Exception:
-            raise unittest.SkipTest("cfg80211 (wireless) is unavailable, can't test")
+        except subprocess.CalledProcessError:
+            print('cfg80211 (wireless) is unavailable, can\'t test', file=sys.stderr)
+            raise
 
     @classmethod
     def tearDownClass(klass):
-        subprocess.check_call(['iw', 'reg', 'set', klass.orig_country])
+        if klass.orig_country is not None:
+            subprocess.check_call(['iw', 'reg', 'set', klass.orig_country])
         super().tearDownClass()
 
     @classmethod
     def create_devices(klass):
         '''Create Access Point and Client devices with mac80211_hwsim and veth'''
+        # TODO: Consider using some trickery, to allow loading modules on the
+        # host by name/alias from within a container.
+        # https://github.com/weaveworks/weave/issues/3115
+        # https://x.com/lucabruno/status/902934379835662336
+        # https://github.com/docker-library/docker/blob/master/modprobe.sh  # wokeignore:rule=master
+        # https://github.com/torvalds/linux/blob/master/net/core/dev_ioctl.c:dev_load()  # wokeignore:rule=master
+        # e.g. via netdev ioctl SIOCGIFINDEX:
+        # https://github.com/weaveworks/go-odp/blob/master/odp/dpif.go#L67  # wokeignore:rule=master
+        #
+        # Or alternatively, port the WiFi testing to virt_wifi, which can be
+        # auto-loaded via "ip link add link eth0 name wlan42 type virt_wifi"
+        # inside a (privileged) LXC container, as used by autopkgtest.
+
         if os.path.exists('/sys/module/mac80211_hwsim'):
             raise SystemError('mac80211_hwsim module already loaded')
-        super().create_devices()
         # create virtual wlan devs
         before_wlan = set([c for c in os.listdir('/sys/class/net') if c.startswith('wlan')])
         subprocess.check_call(['modprobe', 'mac80211_hwsim'])
@@ -583,6 +672,7 @@ class IntegrationTestsWifi(IntegrationTestsBase):
         # don't let NM trample over our fake AP
         with open('/etc/NetworkManager/conf.d/99-test-denylist-wifi.conf', 'w') as f:
             f.write('[keyfile]\nunmanaged-devices+=%s\n' % klass.dev_w_ap)
+        super().create_devices()
 
     @classmethod
     def shutdown_devices(klass):

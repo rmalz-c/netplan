@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <regex.h>
 #include <arpa/inet.h>
+#include <inttypes.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -353,7 +354,7 @@ process_mapping(NetplanParser* npp, yaml_node_t* node, const char* key_prefix, c
 STATIC gboolean
 handle_generic_guint(NetplanParser* npp, yaml_node_t* node, const void* entryptr, const void* data, GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     guint offset = GPOINTER_TO_UINT(data);
     guint64 v;
     gchar* endptr;
@@ -376,7 +377,7 @@ handle_generic_guint(NetplanParser* npp, yaml_node_t* node, const void* entryptr
 STATIC gboolean
 handle_generic_str(NetplanParser* npp, yaml_node_t* node, void* entryptr, const void* data, __unused GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     guint offset = GPOINTER_TO_UINT(data);
     char** dest = (char**) ((void*) entryptr + offset);
     g_free(*dest);
@@ -388,10 +389,10 @@ handle_generic_str(NetplanParser* npp, yaml_node_t* node, void* entryptr, const 
 STATIC gboolean
 handle_special_macaddress_option(NetplanParser* npp, yaml_node_t* node, void* entryptr, const void* data, GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     g_assert(node->type == YAML_SCALAR_NODE);
 
-    if (!_is_macaddress_special_nm_option(scalar(node)) &&
+    if (!_is_macaddress_special_nm_option(npp->current.netdef, scalar(node)) &&
         !_is_macaddress_special_nd_option(scalar(node)))
         return FALSE;
 
@@ -407,7 +408,7 @@ handle_special_macaddress_option(NetplanParser* npp, yaml_node_t* node, void* en
 STATIC gboolean
 handle_generic_mac(NetplanParser* npp, yaml_node_t* node, void* entryptr, const void* data, GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     g_assert(node->type == YAML_SCALAR_NODE);
 
     if (!_is_valid_macaddress(scalar(node)))
@@ -424,7 +425,7 @@ handle_generic_mac(NetplanParser* npp, yaml_node_t* node, void* entryptr, const 
 STATIC gboolean
 handle_generic_bool(NetplanParser* npp, yaml_node_t* node, void* entryptr, const void* data, GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     guint offset = GPOINTER_TO_UINT(data);
     gboolean v;
     gboolean* dest = ((void*) entryptr + offset);
@@ -455,7 +456,7 @@ handle_generic_bool(NetplanParser* npp, yaml_node_t* node, void* entryptr, const
 STATIC gboolean
 handle_generic_tristate(NetplanParser* npp, yaml_node_t* node, void* entryptr, const void* data, GError** error)
 {
-    g_assert(entryptr);
+    g_assert(entryptr != NULL);
     NetplanTristate v;
     guint offset = GPOINTER_TO_UINT(data);
     NetplanTristate* dest = ((void*) entryptr + offset);
@@ -694,7 +695,7 @@ handle_netdef_set_mac(NetplanParser* npp, yaml_node_t* node, const void* data, G
         if (!handle_special_macaddress_option(npp, node, npp->current.netdef, data, NULL)) {
             return yaml_error(npp, node, error,
                               "Invalid MAC address '%s', must be XX:XX:XX:XX:XX:XX, XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX"
-                              " or one of 'permanent', 'random', 'stable', 'preserve'.",
+                              " or one of 'permanent', 'random', 'stable', 'preserve', 'stable-ssid' (Wi-Fi only).",
                               scalar(node));
         }
     }
@@ -1009,11 +1010,18 @@ STATIC gboolean
 handle_auth_key_management(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GError** error)
 {
     NetplanAuthenticationSettings* auth = npp->current.auth;
-    g_assert(auth);
+    g_assert(auth != NULL);
     if (strcmp(scalar(node), "none") == 0)
         auth->key_management = NETPLAN_AUTH_KEY_MANAGEMENT_NONE;
     else if (strcmp(scalar(node), "psk") == 0)
         auth->key_management = NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSK;
+    else if (strcmp(scalar(node), "psk-sha256") == 0) {
+        /* WPA-PSK-SHA256 is commonly used with Protected Management Frames
+         * so let's set it as optional
+         */
+        auth->key_management = NETPLAN_AUTH_KEY_MANAGEMENT_WPA_PSKSHA256;
+        auth->pmf_mode = NETPLAN_AUTH_PMF_MODE_OPTIONAL;
+    }
     else if (strcmp(scalar(node), "eap") == 0)
         auth->key_management = NETPLAN_AUTH_KEY_MANAGEMENT_WPA_EAP;
     else if (strcmp(scalar(node), "eap-sha256") == 0) {
@@ -1048,7 +1056,7 @@ STATIC gboolean
 handle_auth_method(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GError** error)
 {
     NetplanAuthenticationSettings* auth = npp->current.auth;
-    g_assert(auth);
+    g_assert(auth != NULL);
     if (strcmp(scalar(node), "tls") == 0)
         auth->eap_method = NETPLAN_AUTH_EAP_TLS;
     else if (strcmp(scalar(node), "peap") == 0)
@@ -1103,7 +1111,7 @@ handle_ap_backend_settings_str(NetplanParser* npp, yaml_node_t* node, const void
 STATIC gboolean
 handle_access_point_datalist(NetplanParser* npp, yaml_node_t* node, const char* key_prefix, const void* data, GError** error)
 {
-    g_assert(npp->current.access_point);
+    g_assert(npp->current.access_point != NULL);
     gboolean ret = handle_generic_datalist(npp, node, key_prefix, npp->current.access_point, data, error);
 
     GData** list = &npp->current.access_point->backend_settings.passthrough;
@@ -1152,7 +1160,7 @@ STATIC gboolean
 handle_access_point_password(NetplanParser* npp, yaml_node_t* node, __unused const void* _, __unused GError** error)
 {
     NetplanWifiAccessPoint *access_point = npp->current.access_point;
-    g_assert(access_point);
+    g_assert(access_point != NULL);
     /* shortcut for WPA-PSK */
     access_point->has_auth = TRUE;
     if (access_point->auth.key_management == NETPLAN_AUTH_KEY_MANAGEMENT_NONE)
@@ -1170,7 +1178,7 @@ handle_access_point_auth(NetplanParser* npp, yaml_node_t* node, __unused const c
     NetplanWifiAccessPoint *access_point = npp->current.access_point;
     gboolean ret;
 
-    g_assert(access_point);
+    g_assert(access_point != NULL);
     access_point->has_auth = TRUE;
 
     npp->current.auth = &access_point->auth;
@@ -1184,7 +1192,7 @@ STATIC gboolean
 handle_access_point_mode(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GError** error)
 {
     NetplanWifiAccessPoint *access_point = npp->current.access_point;
-    g_assert(access_point);
+    g_assert(access_point != NULL);
     if (strcmp(scalar(node), "infrastructure") == 0)
         access_point->mode = NETPLAN_WIFI_MODE_INFRASTRUCTURE;
     else if (strcmp(scalar(node), "adhoc") == 0)
@@ -1200,7 +1208,7 @@ STATIC gboolean
 handle_access_point_band(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GError** error)
 {
     NetplanWifiAccessPoint *access_point = npp->current.access_point;
-    g_assert(access_point);
+    g_assert(access_point != NULL);
     if (strcmp(scalar(node), "5GHz") == 0 || strcmp(scalar(node), "5G") == 0)
         access_point->band = NETPLAN_WIFI_BAND_5;
     else if (strcmp(scalar(node), "2.4GHz") == 0 || strcmp(scalar(node), "2.4G") == 0)
@@ -1218,7 +1226,7 @@ handle_tunnel_key_flags(NetplanParser* npp, yaml_node_t* node, __unused const vo
         gboolean found = FALSE;
         assert_type(npp, entry, YAML_SCALAR_NODE);
 
-        for (int i = 1; i < NETPLAN_KEY_FLAG_MAX_; i <<= 1) {
+        for (guint i = 1; i < NETPLAN_KEY_FLAG_MAX_; i <<= 1) {
             if (!g_ascii_strcasecmp(scalar(entry), netplan_key_flags_name(i))) {
                 npp->current.netdef->tunnel_private_key_flags |= i;
                 found = TRUE;
@@ -1348,7 +1356,7 @@ handle_wowlan(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GEr
 
         for (unsigned i = 0; NETPLAN_WIFI_WOWLAN_TYPES[i].name != NULL; ++i) {
             if (g_ascii_strcasecmp(scalar(entry), NETPLAN_WIFI_WOWLAN_TYPES[i].name) == 0) {
-                npp->current.netdef->wowlan |= NETPLAN_WIFI_WOWLAN_TYPES[i].flag;
+                npp->current.netdef->wowlan |= (gint)NETPLAN_WIFI_WOWLAN_TYPES[i].flag;
                 found = TRUE;
                 break;
             }
@@ -1356,7 +1364,7 @@ handle_wowlan(NetplanParser* npp, yaml_node_t* node, __unused const void* _, GEr
         if (!found)
             return yaml_error(npp, node, error, "invalid value for wakeonwlan: '%s'", scalar(entry));
     }
-    if (npp->current.netdef->wowlan > NETPLAN_WIFI_WOWLAN_DEFAULT && npp->current.netdef->wowlan & NETPLAN_WIFI_WOWLAN_TYPES[0].flag)
+    if (npp->current.netdef->wowlan > NETPLAN_WIFI_WOWLAN_DEFAULT && npp->current.netdef->wowlan & (gint)NETPLAN_WIFI_WOWLAN_TYPES[0].flag)
         return yaml_error(npp, node, error, "'default' is an exclusive flag for wakeonwlan");
     return TRUE;
 }
@@ -1406,8 +1414,8 @@ const mapping_entry_handler address_option_handlers[] = {
 STATIC gboolean
 handle_generic_addresses(NetplanParser* npp, yaml_node_t* node, gboolean check_zero_prefix, GArray** ip4, GArray** ip6, GError** error)
 {
-    g_assert(ip4);
-    g_assert(ip6);
+    g_assert(ip4 != NULL);
+    g_assert(ip6 != NULL);
     for (yaml_node_item_t *i = node->data.sequence.items.start; i < node->data.sequence.items.top; i++) {
         g_autofree char* addr = NULL;
         char* prefix_len;
@@ -1838,7 +1846,7 @@ handle_optional_addresses(NetplanParser* npp, yaml_node_t* node, __unused const 
 STATIC gboolean
 handle_vxlan_flags(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.vxlan);
+    g_assert(npp->current.vxlan != NULL);
     assert_type(npp, node, YAML_SEQUENCE_NODE);
     yaml_node_t* key_node = node-1; // The YAML key of given sequence `node`
 
@@ -1864,8 +1872,8 @@ handle_vxlan_flags(NetplanParser* npp, yaml_node_t* node, const void* data, GErr
             break;
         default: g_assert_not_reached(); // LCOV_EXCL_LINE
     }
-    g_assert(flags);
-    g_assert(out_ptr);
+    g_assert(flags != NULL);
+    g_assert(out_ptr != NULL);
 
     for (yaml_node_item_t *i = node->data.sequence.items.start; i < node->data.sequence.items.top; i++) {
         yaml_node_t *entry = yaml_document_get_node(&npp->doc, *i);
@@ -1894,21 +1902,21 @@ handle_vxlan_flags(NetplanParser* npp, yaml_node_t* node, const void* data, GErr
 STATIC gboolean
 handle_vxlan_guint(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.vxlan);
+    g_assert(npp->current.vxlan != NULL);
     return handle_generic_guint(npp, node, npp->current.vxlan, data, error);
 }
 
 STATIC gboolean
 handle_vxlan_tristate(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.vxlan);
+    g_assert(npp->current.vxlan != NULL);
     return handle_generic_tristate(npp, node, npp->current.vxlan, data, error);
 }
 
 STATIC int
 get_ip_family(const char* address)
 {
-    g_autofree char *ip_str;
+    g_autofree char *ip_str = NULL;
     char *prefix_len;
 
     ip_str = g_strdup(address);
@@ -1941,7 +1949,7 @@ check_and_set_family(gint family, gint* dest)
 STATIC gboolean
 handle_routes_bool(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.route);
+    g_assert(npp->current.route != NULL);
     return handle_generic_bool(npp, node, npp->current.route, data, error);
 }
 
@@ -2043,14 +2051,14 @@ handle_ip_rule_ip(NetplanParser* npp, yaml_node_t* node, const void* data, GErro
 STATIC gboolean
 handle_ip_rule_guint(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.ip_rule);
+    g_assert(npp->current.ip_rule != NULL);
     return handle_generic_guint(npp, node, npp->current.ip_rule, data, error);
 }
 
 STATIC gboolean
 handle_routes_guint(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.route);
+    g_assert(npp->current.route != NULL);
     return handle_generic_guint(npp, node, npp->current.route, data, error);
 }
 
@@ -2073,7 +2081,7 @@ handle_bridge_path_cost(NetplanParser* npp, yaml_node_t* node, const char* key_p
 {
     for (yaml_node_pair_t* entry = node->data.mapping.pairs.start; entry < node->data.mapping.pairs.top; entry++) {
         yaml_node_t* key, *value;
-        guint v;
+        guint64 v;
         gchar* endptr;
         NetplanNetDefinition *component;
         guint* ref_ptr;
@@ -2103,9 +2111,10 @@ handle_bridge_path_cost(NetplanParser* npp, yaml_node_t* node, const char* key_p
             if (*endptr != '\0')
                 return yaml_error(npp, node, error, "invalid unsigned int value '%s'", scalar(value));
 
-            g_debug("%s: adding path '%s' of cost: %d", npp->current.netdef->id, scalar(key), v);
+            g_debug("%s: adding path '%s' of cost: %" PRIu64, npp->current.netdef->id, scalar(key), v);
 
-            *ref_ptr = v;
+            g_assert(v < G_MAXUINT);
+            *ref_ptr = (guint)v;
             mark_data_as_dirty(npp, ref_ptr);
         }
     }
@@ -2117,7 +2126,7 @@ handle_bridge_port_priority(NetplanParser* npp, yaml_node_t* node, const char* k
 {
     for (yaml_node_pair_t* entry = node->data.mapping.pairs.start; entry < node->data.mapping.pairs.top; entry++) {
         yaml_node_t* key, *value;
-        guint v;
+        guint64 v;
         gchar* endptr;
         NetplanNetDefinition *component;
         guint* ref_ptr;
@@ -2148,9 +2157,10 @@ handle_bridge_port_priority(NetplanParser* npp, yaml_node_t* node, const char* k
                 return yaml_error(npp, node, error, "invalid port priority value (must be between 0 and 63): %s",
                                   scalar(value));
 
-            g_debug("%s: adding port '%s' of priority: %d", npp->current.netdef->id, scalar(key), v);
+            g_debug("%s: adding port '%s' of priority: %" PRIu64, npp->current.netdef->id, scalar(key), v);
 
-            *ref_ptr = v;
+            g_assert(v < G_MAXUINT);
+            *ref_ptr = (guint)v;
             mark_data_as_dirty(npp, ref_ptr);
         }
     }
@@ -2343,8 +2353,9 @@ handle_arp_ip_targets(NetplanParser* npp, yaml_node_t* node, __unused const void
 
     /* Avoid adding the same arp_ip_targets in a 2nd parsing pass by comparing
      * the array size to the YAML sequence size. Skip if they are equal. */
-    guint item_count = node->data.sequence.items.top - node->data.sequence.items.start;
-    if (npp->current.netdef->bond_params.arp_ip_targets->len == item_count) {
+    ptrdiff_t item_count = node->data.sequence.items.top - node->data.sequence.items.start;
+    g_assert(item_count >= 0);
+    if (npp->current.netdef->bond_params.arp_ip_targets->len == (guint)item_count) {
         g_debug("%s: all arp ip targets have already been added", npp->current.netdef->id);
         return TRUE;
     }
@@ -2595,7 +2606,7 @@ handle_tunnel_key_mapping(NetplanParser* npp, yaml_node_t* node, const char* key
 STATIC gboolean
 handle_wireguard_peer_str(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.wireguard_peer);
+    g_assert(npp->current.wireguard_peer != NULL);
     return handle_generic_str(npp, node, npp->current.wireguard_peer, data, error);
 }
 
@@ -2606,7 +2617,7 @@ handle_wireguard_peer_str(NetplanParser* npp, yaml_node_t* node, const void* dat
 STATIC gboolean
 handle_wireguard_peer_guint(NetplanParser* npp, yaml_node_t* node, const void* data, GError** error)
 {
-    g_assert(npp->current.wireguard_peer);
+    g_assert(npp->current.wireguard_peer != NULL);
     return handle_generic_guint(npp, node, npp->current.wireguard_peer, data, error);
 }
 
@@ -2689,8 +2700,9 @@ handle_wireguard_peers(NetplanParser* npp, yaml_node_t* node, __unused const voi
 
     /* Avoid adding the same peers in a 2nd parsing pass by comparing
      * the array size to the YAML sequence size. Skip if they are equal. */
-    guint item_count = node->data.sequence.items.top - node->data.sequence.items.start;
-    if (npp->current.netdef->wireguard_peers->len == item_count) {
+    ptrdiff_t item_count = node->data.sequence.items.top - node->data.sequence.items.start;
+    g_assert(item_count >= 0);
+    if (npp->current.netdef->wireguard_peers->len == (guint)item_count) {
         g_debug("%s: all wireguard peers have already been added", npp->current.netdef->id);
         return TRUE;
     }
@@ -3371,11 +3383,6 @@ handle_network_type(NetplanParser* npp, yaml_node_t* node, const char* key_prefi
             case NETPLAN_DEF_TYPE_NM:
                 g_debug("netplan: %s: handling NetworkManager passthrough device, settings are not fully supported.", npp->current.netdef->id);
                 handlers = ethernet_def_handlers;
-                if (npp->current.netdef->backend != NETPLAN_BACKEND_NM) {
-                    g_debug("nm-device: %s: the renderer for nm-devices must be NetworkManager, it will be used instead of the defined one.",
-                              npp->current.netdef->id);
-                    npp->current.netdef->backend = NETPLAN_BACKEND_NM;
-                }
                 break;
             default: g_assert_not_reached(); // LCOV_EXCL_LINE
         }
@@ -3402,6 +3409,12 @@ handle_network_type(NetplanParser* npp, yaml_node_t* node, const char* key_prefi
             } else {
                 return FALSE;
             }
+        }
+
+        if (npp->current.netdef->type == NETPLAN_DEF_TYPE_NM && npp->current.netdef->backend != NETPLAN_BACKEND_NM) {
+            g_debug("nm-device: %s: the renderer for nm-devices must be NetworkManager, it will be used instead of the defined one.",
+                    npp->current.netdef->id);
+            npp->current.netdef->backend = NETPLAN_BACKEND_NM;
         }
 
         /* Postprocessing */
@@ -3538,8 +3551,8 @@ STATIC gboolean
 process_document(NetplanParser* npp, GError** error)
 {
     gboolean ret;
-    int previously_found;
-    int still_missing;
+    guint previously_found;
+    guint still_missing;
 
     g_assert(npp->missing_id == NULL);
     npp->missing_id = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, g_free);

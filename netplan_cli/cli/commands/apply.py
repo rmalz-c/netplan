@@ -25,9 +25,6 @@ import sys
 import glob
 import subprocess
 import shutil
-import tempfile
-import filecmp
-import netifaces
 import time
 
 from .. import utils
@@ -110,50 +107,47 @@ class NetplanApply(utils.NetplanCommand):
             else:
                 return
 
-        ovs_cleanup_service = '/run/systemd/system/netplan-ovs-cleanup.service'
-        old_ovs_glob = glob.glob('/run/systemd/system/netplan-ovs-*')
+        ovs_cleanup_service = self.generator_late_dir + 'netplan-ovs-cleanup.service'
+        old_files_networkd = bool(glob.glob('/run/systemd/network/*netplan-*'))
+        old_ovs_glob = glob.glob(self.generator_late_dir + 'netplan-ovs-*')
         # Ignore netplan-ovs-cleanup.service, as it can always be there
         if ovs_cleanup_service in old_ovs_glob:
             old_ovs_glob.remove(ovs_cleanup_service)
         old_files_ovs = bool(old_ovs_glob)
         old_nm_glob = glob.glob('/run/NetworkManager/system-connections/netplan-*')
-        nm_ifaces = utils.nm_interfaces(old_nm_glob, netifaces.interfaces())
+        nm_ifaces = utils.nm_interfaces(old_nm_glob, utils.get_interfaces())
         old_files_nm = bool(old_nm_glob)
 
-        restart_networkd = False
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # needs to be a subfolder as copytree wants to create it
-            run_systemd_network = '/run/systemd/network'
-            old_files_dir = os.path.join(tmp_dir, 'cfg')
-            has_old_networkd_config = os.path.isdir(run_systemd_network)
-            if has_old_networkd_config:
-                shutil.copytree(run_systemd_network, old_files_dir)
+        configure = []
+        configure_out = None
+        if 'NETPLAN_PROFILE' in os.environ:
+            configure.extend(['valgrind', '--leak-check=full'])
+            configure_out = subprocess.STDOUT
 
-            generator_call = []
-            generate_out = None
-            if 'NETPLAN_PROFILE' in os.environ:
-                generator_call.extend(['valgrind', '--leak-check=full'])
-                generate_out = subprocess.STDOUT
-
-            generator_call.append(utils.get_generator_path())
-            if run_generate and subprocess.call(generator_call, stderr=generate_out) != 0:
+        configure.append(utils.get_configure_path())
+        if run_generate:
+            logging.debug('command configure: running %s', configure)
+            if subprocess.call(configure, stderr=configure_out) != 0:
                 if exit_on_error:
                     sys.exit(os.EX_CONFIG)
                 else:
                     raise ConfigurationError("the configuration could not be generated")
+            # Running 'systemctl daemon-reload' will re-run the netplan systemd generator.
+            logging.debug('executing Netplan systemd-generator via daemon-reload')
+            utils.systemctl_daemon_reload()
 
-            # Restart networkd if something in the configuration changed
-            has_new_networkd_config = os.path.isdir(run_systemd_network)
-            if has_old_networkd_config != has_new_networkd_config:
-                restart_networkd = True
-            elif has_old_networkd_config and has_new_networkd_config:
-                comp = filecmp.dircmp(run_systemd_network, old_files_dir)
-                if comp.left_only or comp.right_only or comp.diff_files:
-                    restart_networkd = True
+        devices = utils.get_interfaces()
 
-        devices = netifaces.interfaces()
-
-        restart_ovs_glob = glob.glob('/run/systemd/system/netplan-ovs-*')
+        # Re-start service when
+        # 1. We have configuration files for it
+        # 2. Previously we had config files for it but not anymore
+        # Ideally we should compare the content of the *netplan-* files before and
+        # after generation to minimize the number of re-starts, but the conditions
+        # above works too.
+        restart_networkd = bool(glob.glob('/run/systemd/network/*netplan-*'))
+        if not restart_networkd and old_files_networkd:
+            restart_networkd = True
+        restart_ovs_glob = glob.glob(self.generator_late_dir + 'netplan-ovs-*')
         # Ignore netplan-ovs-cleanup.service, as it can always be there
         if ovs_cleanup_service in restart_ovs_glob:
             restart_ovs_glob.remove(ovs_cleanup_service)
@@ -168,10 +162,6 @@ class NetplanApply(utils.NetplanCommand):
         if not restart_nm and old_files_nm:
             restart_nm = True
 
-        # Running 'systemctl daemon-reload' will re-run the netplan systemd generator,
-        # so let's make sure we only run it iff we're willing to run 'netplan generate'
-        if run_generate:
-            utils.systemctl_daemon_reload()
         # stop backends
         if restart_networkd:
             logging.debug('netplan generated networkd configuration changed, reloading networkd')
@@ -203,7 +193,7 @@ class NetplanApply(utils.NetplanCommand):
             logging.debug('no netplan generated NM configuration exists')
 
         # Refresh devices now; restarting a backend might have made something appear.
-        devices = netifaces.interfaces()
+        devices = utils.get_interfaces()
 
         # evaluate config for extra steps we need to take (like renaming)
         # for now, only applies to non-virtual (real) devices.
@@ -223,7 +213,7 @@ class NetplanApply(utils.NetplanCommand):
         # the interface name, if it was already renamed once (e.g. during boot),
         # because of the NamePolicy=keep default:
         # https://www.freedesktop.org/software/systemd/man/systemd.net-naming-scheme.html
-        devices = netifaces.interfaces()
+        devices = utils.get_interfaces()
         for device in devices:
             logging.debug('netplan triggering .link rules for %s', device)
             try:
@@ -239,7 +229,7 @@ class NetplanApply(utils.NetplanCommand):
             except subprocess.CalledProcessError:
                 logging.debug('Ignoring device without syspath: %s', device)
 
-        devices_after_udev = netifaces.interfaces()
+        devices_after_udev = utils.get_interfaces()
         # apply some more changes manually
         for iface, settings in changes.items():
             # rename non-critical network interfaces
@@ -263,19 +253,25 @@ class NetplanApply(utils.NetplanCommand):
                                       stderr=subprocess.DEVNULL)
 
         subprocess.check_call(['udevadm', 'control', '--reload'])
-        subprocess.check_call(['udevadm', 'trigger', '--action=move', '--subsystem-match=net', '--settle'])
+
+        try:
+            subprocess.check_call(['udevadm', 'trigger', '--action=move', '--subsystem-match=net', '--settle'])
+        except subprocess.CalledProcessError as e:
+            # udevadm trigger returns 1 if it cannot trigger devices since
+            # systemd v248, e.g. in containers (LP: #2095203)
+            logging.warning('Ignoring device trigger error: {}'.format(e))
 
         # apply any SR-IOV related changes, if applicable
         NetplanApply.process_sriov_config(config_manager, exit_on_error)
 
         # (re)set global regulatory domain
-        if os.path.exists('/run/systemd/system/netplan-regdom.service'):
+        if os.path.exists(self.generator_late_dir + 'netplan-regdom.service'):
             utils.systemctl('start', ['netplan-regdom.service'])
         # (re)start backends
         if restart_networkd:
-            netplan_wpa = [os.path.basename(f) for f in glob.glob('/run/systemd/system/*.wants/netplan-wpa-*.service')]
+            netplan_wpa = [os.path.basename(f) for f in glob.glob(self.generator_late_dir + '*.wants/netplan-wpa-*.service')]
             # exclude the special 'netplan-ovs-cleanup.service' unit
-            netplan_ovs = [os.path.basename(f) for f in glob.glob('/run/systemd/system/*.wants/netplan-ovs-*.service')
+            netplan_ovs = [os.path.basename(f) for f in glob.glob(self.generator_late_dir + '*.wants/netplan-ovs-*.service')
                            if not f.endswith('/' + OVS_CLEANUP_SERVICE)]
             # Run 'systemctl start' command synchronously, to avoid race conditions
             # with 'oneshot' systemd service units, e.g. netplan-ovs-*.service.
@@ -332,23 +328,6 @@ class NetplanApply(utils.NetplanCommand):
                 utils.nm_bring_interface_up(loopback_connection)
 
     @staticmethod
-    def is_composite_member(composites, phy):
-        """
-        Is this physical interface a member of a 'composite' virtual
-        interface? (bond, bridge)
-        """
-        for composite in composites:
-            for _, settings in composite.items():
-                if not type(settings) is dict:
-                    continue
-                members = settings.get('interfaces', [])
-                for iface in members:
-                    if iface == phy:
-                        return True
-
-        return False
-
-    @staticmethod
     def clear_virtual_links(prev_links, curr_links, devices=[]):
         """
         Calculate the delta of virtual links. And remove the links that were
@@ -382,7 +361,6 @@ class NetplanApply(utils.NetplanCommand):
         """
 
         changes = {}
-        composite_interfaces = [config_manager.bridges, config_manager.bonds]
 
         # Find physical interfaces which need a rename
         # But do not rename virtual interfaces
@@ -392,11 +370,6 @@ class NetplanApply(utils.NetplanCommand):
                 continue  # Skip if no new name needs to be set
             if not netdef._has_match:
                 continue  # Skip if no match for current name is given
-            if NetplanApply.is_composite_member(composite_interfaces, netdef.id):
-                logging.debug('Skipping composite member {}'.format(netdef.id))
-                # do not rename members of virtual devices. MAC addresses
-                # may be the same for all interface members.
-                continue
             # Find current name of the interface, according to match conditions and globs (name, mac, driver)
             current_iface_name = utils.find_matching_iface(interfaces, netdef)
             if not current_iface_name:

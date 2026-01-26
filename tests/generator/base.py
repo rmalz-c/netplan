@@ -35,10 +35,14 @@ import re
 from io import StringIO
 
 import netplan
+from netplan_cli.cli.ovs import OVS_VSCTL_PATH
 
 exe_generate = os.environ.get('NETPLAN_GENERATE_PATH',
                               os.path.join(os.path.dirname(os.path.dirname(
                                            os.path.dirname(os.path.abspath(__file__)))), 'generate'))
+exe_configure = os.environ.get('NETPLAN_CONFIGURE_PATH',
+                               os.path.join(os.path.dirname(os.path.dirname(
+                                            os.path.dirname(os.path.abspath(__file__)))), 'configure'))
 
 # make sure we point to libnetplan properly.
 os.environ.update({'LD_LIBRARY_PATH': '.:{}'.format(os.environ.get('LD_LIBRARY_PATH'))})
@@ -65,14 +69,15 @@ Wants=ovsdb-server.service\nAfter=ovsdb-server.service\n'
 OVS_PHYSICAL = _OVS_BASE + 'Requires=sys-subsystem-net-devices-%(iface)s.device\nAfter=sys-subsystem-net-devices-%(iface)s\
 .device\nAfter=netplan-ovs-cleanup.service\nBefore=network.target\nWants=network.target\n%(extra)s'
 OVS_VIRTUAL = _OVS_BASE + 'After=netplan-ovs-cleanup.service\nBefore=network.target\nWants=network.target\n%(extra)s'
-OVS_BR_DEFAULT = 'ExecStart=/usr/bin/ovs-vsctl set Bridge %(iface)s external-ids:netplan=true\nExecStart=/usr/bin/ovs-vsctl \
-set-fail-mode %(iface)s standalone\nExecStart=/usr/bin/ovs-vsctl set Bridge %(iface)s external-ids:netplan/global/set-fail-mode=\
-standalone\nExecStart=/usr/bin/ovs-vsctl set Bridge %(iface)s mcast_snooping_enable=false\nExecStart=/usr/bin/ovs-vsctl set \
-Bridge %(iface)s external-ids:netplan/mcast_snooping_enable=false\nExecStart=/usr/bin/ovs-vsctl set Bridge %(iface)s \
-rstp_enable=false\nExecStart=/usr/bin/ovs-vsctl set Bridge %(iface)s external-ids:netplan/rstp_enable=false\n'
+OVS_BR_DEFAULT = 'ExecStart=' + OVS_VSCTL_PATH + ' set Bridge %(iface)s external-ids:netplan=\"true\"\n\
+ExecStart=' + OVS_VSCTL_PATH + ' set-fail-mode %(iface)s standalone\nExecStart=' + OVS_VSCTL_PATH + ' set Bridge %(iface)s \
+external-ids:netplan/global/set-fail-mode=\"standalone\"\nExecStart=' + OVS_VSCTL_PATH + ' set Bridge %(iface)s \
+mcast_snooping_enable=false\nExecStart=' + OVS_VSCTL_PATH + ' set Bridge %(iface)s external-ids:netplan/mcast_snooping_enable=\
+"false"\nExecStart=' + OVS_VSCTL_PATH + ' set Bridge %(iface)s rstp_enable=false\nExecStart=' + OVS_VSCTL_PATH + ' \
+set Bridge %(iface)s external-ids:netplan/rstp_enable=\"false\"\n'
 OVS_BR_EMPTY = _OVS_BASE + 'After=netplan-ovs-cleanup.service\nBefore=network.target\nWants=network.target\n\n[Service]\n\
-Type=oneshot\nTimeoutStartSec=10s\nExecStart=/usr/bin/ovs-vsctl --may-exist add-br %(iface)s\n' + OVS_BR_DEFAULT
-OVS_CLEANUP = _OVS_BASE + 'ConditionFileIsExecutable=/usr/bin/ovs-vsctl\nBefore=network.target\nWants=network.target\n\n\
+Type=oneshot\nTimeoutStartSec=10s\nExecStart=' + OVS_VSCTL_PATH + ' --may-exist add-br %(iface)s\n' + OVS_BR_DEFAULT
+OVS_CLEANUP = _OVS_BASE + 'ConditionFileIsExecutable=' + OVS_VSCTL_PATH + '\nBefore=network.target\nWants=network.target\n\n\
 [Service]\nType=oneshot\nTimeoutStartSec=10s\nStartLimitBurst=0\nExecStart=/usr/sbin/netplan apply --only-ovs-cleanup\n'
 UDEV_MAC_RULE = 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="%s", ATTR{address}=="%s", NAME="%s"\n'
 UDEV_NO_MAC_RULE = 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="%s", NAME="%s"\n'
@@ -99,6 +104,7 @@ Wants=network.target
 [Service]
 Type=simple
 ExecStart=/sbin/wpa_supplicant -c /run/netplan/wpa-%(iface)s.conf -i%(iface)s -D%(drivers)s
+ExecReload=/sbin/wpa_cli -i %(iface)s reconfigure
 '''
 NM_MANAGED = 'SUBSYSTEM=="net", ACTION=="add|change|move", ENV{ID_NET_NAME}=="%s", ENV{NM_UNMANAGED}="0"\n'
 NM_UNMANAGED = 'SUBSYSTEM=="net", ACTION=="add|change|move", ENV{ID_NET_NAME}=="%s", ENV{NM_UNMANAGED}="1"\n'
@@ -260,9 +266,18 @@ class TestBase(unittest.TestCase):
     def setUp(self):
         self.workdir = tempfile.TemporaryDirectory()
         self.confdir = os.path.join(self.workdir.name, 'etc', 'netplan')
+        self.rundir = os.path.join(self.workdir.name, 'run', 'netplan')
         self.nm_enable_all_conf = os.path.join(
             self.workdir.name, 'run', 'NetworkManager', 'conf.d', '10-globally-managed-devices.conf')
         self.maxDiff = None
+
+        # Set up a systemd generator for Netplan
+        self.sd_generator = os.path.join(self.workdir.name, 'usr', 'lib', 'systemd', 'system-generators', 'netplan')
+        os.makedirs(os.path.dirname(self.sd_generator))
+        os.symlink(exe_generate, self.sd_generator)
+        self.generator_dir = os.path.join(self.workdir.name, 'run', 'systemd', 'generator')
+        self.generator_early_dir = os.path.join(self.workdir.name, 'run', 'systemd', 'generator.early')
+        self.generator_late_dir = os.path.join(self.workdir.name, 'run', 'systemd', 'generator.late')
 
     def validate_generated_yaml(self, yaml_input):
         '''Validate a list of YAML input files one by one.
@@ -339,27 +354,78 @@ class TestBase(unittest.TestCase):
                 os.chmod(path, mode=0o600)
                 yaml_input.append(path)
 
-        argv = [exe_generate, '--root-dir', self.workdir.name] + extra_args
+        # Generators executed by the system manager are invoked in a sandbox
+        # where most of the file system is read-only except for the generator
+        # output directories. We considered restricting PrivateTmp=disconnected,
+        # too, but it conflicts with self.workdir in public /tmp.
+        # https://www.freedesktop.org/software/systemd/man/latest/systemd.generator.html#Description
+        os.makedirs(self.generator_dir, mode=0o755, exist_ok=True)
+        os.makedirs(self.generator_early_dir, mode=0o755, exist_ok=True)
+        os.makedirs(self.generator_late_dir, mode=0o755, exist_ok=True)
+        sandbox = ['systemd-run', '--user', '--pipe', '--collect', '--quiet',
+                   '--setenv=LD_LIBRARY_PATH=.:{}'.format(os.environ.get('LD_LIBRARY_PATH')),
+                   '--setenv=G_DEBUG=fatal-criticals',
+                   '--property=ProtectSystem=strict',
+                   '--property=ReadWritePaths=' + self.generator_dir,
+                   '--property=ReadWritePaths=' + self.generator_early_dir,
+                   '--property=ReadWritePaths=' + self.generator_late_dir,
+                   # Allow writing of test coverage data inside the project root (meson's _build-cov/ dir)
+                   '--property=ReadWritePaths=' + os.path.dirname(os.environ.get('COVERAGE_PROCESS_START', '/home/'))]
+
+        if os.environ.get('NETPLAN_PARSER_IGNORE_ERRORS'):
+            del os.environ['NETPLAN_PARSER_IGNORE_ERRORS']
+        if not ignore_errors:
+            # for testing only
+            os.environ.setdefault('NETPLAN_PARSER_IGNORE_ERRORS', '0')
+            sandbox += ['--setenv=NETPLAN_PARSER_IGNORE_ERRORS={}'
+                        .format(os.environ.get('NETPLAN_PARSER_IGNORE_ERRORS'))]
+
+        # Avoid the systemd-run sandbox when run in chroot (e.g. during sbuild),
+        # as it does not provide a functional systemd environment. The
+        # ReadWritePaths restriction will still be tested inside the upstream CI
+        # and locally, using 'make check'.
+        if not os.path.isdir('/run/systemd/system'):
+            sandbox = []  # pragma: nocover (runs during sbuild)
+
+        argv_gen = sandbox + [self.sd_generator, '--root-dir', self.workdir.name,
+                              self.generator_dir, self.generator_early_dir, self.generator_late_dir]
+        argv = [exe_configure, '--root-dir', self.workdir.name] + extra_args
         if 'TEST_SHELL' in os.environ:  # pragma nocover
             print('Test is about to run:\n%s' % ' '.join(argv))
             subprocess.call(['bash', '-i'], cwd=self.workdir.name)
 
+        # if called as generator (passing generator{early,late} dirs) it will
+        # ignore errors by default. Errors are forced via NETPLAN_PARSER_IGNORE_ERRORS=0.
         if ignore_errors:
+            argv_gen += ['--ignore-errors']
             argv += ['--ignore-errors']
 
+        g = subprocess.Popen(argv_gen, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        (out_gen, err_gen) = g.communicate()
         p = subprocess.Popen(argv, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
         (out, err) = p.communicate()
         if expect_fail:
-            self.assertGreater(p.returncode, 0)
-        else:
-            self.assertEqual(p.returncode, 0, err)
+            self.assertGreater(p.returncode, 0, err)
+            if not extra_args:
+                self.assertGreater(g.returncode, 0, err_gen)
+            else:
+                # sd-generator cannot handle the extra_args and will pass
+                # (for testing only)
+                self.assertEqual(g.returncode, 0)
+        self.assertEqual(out_gen, '')
         self.assertEqual(out, '')
         if not expect_fail and not skip_generated_yaml_validation:
             yaml_input = list(set(yaml_input + extra_args))
             yaml_input.sort()
             self.validate_generated_yaml(yaml_input)
-        return err
+
+        ret_output = err_gen if err_gen else err
+        if err_gen and err:
+            ret_output = err_gen + '#*#' + err
+
+        return ret_output
 
     def eth_name(self):
         """Return a link name.
@@ -382,7 +448,7 @@ class TestBase(unittest.TestCase):
             self.assertFalse(os.path.exists(networkd_dir))
             return
 
-        self.assertEqual(set(os.listdir(self.workdir.name)) - {'lib'}, {'etc', 'run'})
+        self.assertEqual(set(os.listdir(self.workdir.name)) - {'usr', 'lib'}, {'etc', 'run'})
         self.assertEqual(set(os.listdir(networkd_dir)),
                          {'10-netplan-' + f for f in file_contents_map})
         for fname, contents in file_contents_map.items():
@@ -468,13 +534,13 @@ class TestBase(unittest.TestCase):
             self.assertEqual(''.join(lines), contents)
 
     def assert_ovs(self, file_contents_map):
-        systemd_dir = os.path.join(self.workdir.name, 'run', 'systemd', 'system')
+        systemd_dir = self.generator_late_dir
         if not file_contents_map:
             # in this case we assume no OVS configuration should be present
             self.assertFalse(glob.glob(os.path.join(systemd_dir, '*netplan-ovs-*.service')))
             return
 
-        self.assertEqual(set(os.listdir(self.workdir.name)) - {'lib'}, {'etc', 'run'})
+        self.assertIn('run', os.listdir(self.workdir.name))
         ovs_systemd_dir = set(os.listdir(systemd_dir))
         ovs_systemd_dir.remove('systemd-networkd.service.wants')
         if 'systemd-networkd-wait-online.service.d' in ovs_systemd_dir:
@@ -491,14 +557,14 @@ class TestBase(unittest.TestCase):
                 link_target = os.readlink(link_path)
                 self.assertEqual(link_target,
                                  os.path.join(
-                                    '/', 'run', 'systemd', 'system', fname))
+                                    self.generator_late_dir, fname))
 
     def assert_sriov(self, file_contents_map):
-        systemd_dir = os.path.join(self.workdir.name, 'run', 'systemd', 'system')
+        systemd_dir = self.generator_late_dir
         sriov_systemd_dir = glob.glob(os.path.join(systemd_dir, '*netplan-sriov-*.service'))
         self.assertEqual(set(os.path.basename(file) for file in sriov_systemd_dir),
                          {'netplan-sriov-' + f for f in file_contents_map})
-        self.assertEqual(set(os.listdir(self.workdir.name)) - {'lib'}, {'etc', 'run'})
+        self.assertEqual(set(os.listdir(self.workdir.name)) - {'usr', 'lib'}, {'etc', 'run'})
 
         for file in sriov_systemd_dir:
             basename = os.path.basename(file)

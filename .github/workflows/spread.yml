@@ -12,17 +12,13 @@ on:
 
 jobs:
   spread:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: canonical/setup-lxd@v0.1.1
       - uses: actions/checkout@v3
       - name: Install spread
         run: |
-          # TODO: Once Spread PR #179 is merged, go back to:
-          # go install github.com/snapcore/spread/cmd/spread@latest
-          git clone --depth 1 --branch thp https://github.com/thp-canonical/spread spread-fork
-          cd spread-fork && go install ./cmd/spread
-          cd .. && rm -r spread-fork
+          go install github.com/snapcore/spread/cmd/spread@latest
       - name: Run the spread test inside LXD
         run: |
           ~/go/bin/spread -v lxd:
